@@ -9,7 +9,8 @@ on:
 
 env:
   WXSQLITE3_REPO: utelle/wxsqlite3
-  WXSQLITE3_REF: master
+  # upstream default is main (not master); use a tag e.g. v4.12.2 for reproducible builds
+  WXSQLITE3_REF: main
   WXWIDGETS_REF: v3.2.10
   # Side-by-side install path (avoids vswhere picking the wrong VS on the runner image)
   VS2022_INSTALL: C:\vs2022-buildtools
