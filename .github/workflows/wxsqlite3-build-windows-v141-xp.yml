@@ -12,8 +12,6 @@ env:
   # upstream default is main (not master); use a tag e.g. v4.12.2 for reproducible builds
   WXSQLITE3_REF: main
   WXWIDGETS_REF: v3.2.10
-  # Side-by-side install path (avoids vswhere picking the wrong VS on the runner image)
-  VS2022_INSTALL: C:\vs2022-buildtools
 
 jobs:
   build:
@@ -36,12 +34,12 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
           $bootstrapper = Join-Path $env:TEMP "vs_BuildTools.exe"
           Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vs_BuildTools.exe" -OutFile $bootstrapper -UseBasicParsing
-          $installPath = $env:VS2022_INSTALL
-          Write-Host "Installing VS 2022 Build Tools to $installPath (first run can take 15-25 minutes)"
+          # Use default install layout under Program Files (x86); custom paths often miss VC\Auxiliary\Build on runners.
+          Write-Host "Installing VS 2022 Build Tools (default path; first run can take 15-25 minutes)"
           $args = @(
             "--quiet", "--wait", "--norestart", "--nocache",
-            "--installPath", $installPath,
             "--add", "Microsoft.VisualStudio.Workload.VCTools",
+            "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
             "--add", "Microsoft.VisualStudio.Component.VC.v141.x86.x64",
             "--add", "Microsoft.VisualStudio.Component.WinXP"
           )
@@ -50,10 +48,18 @@ jobs:
             throw "vs_BuildTools.exe exited with $($p.ExitCode)"
           }
           $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-          $verify = & $vswhere -latest -products Microsoft.VisualStudio.Product.BuildTools -property installationPath
-          if ($verify -ne $installPath) {
-            Write-Warning "vswhere BuildTools path is '$verify'; expected '$installPath'. Using VS2022_INSTALL for builds."
+          $root = & $vswhere -latest -products Microsoft.VisualStudio.Product.BuildTools `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $root) {
+            throw "vswhere: no VS 2022 Build Tools with VC.Tools.x86.x64 (install may have failed or skipped C++)."
           }
+          $vcvars32 = Join-Path $root "VC\Auxiliary\Build\vcvars32.bat"
+          if (-not (Test-Path $vcvars32)) {
+            Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+            throw "Missing VC toolchain: $vcvars32"
+          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VS_INST=$root"
+          Write-Host "Build will use VS_INST=$root"
 
       - name: Checkout wxWidgets
         uses: actions/checkout@v4
@@ -79,8 +85,8 @@ jobs:
       - name: Build wxWidgets and wxSQLite3 (Win32 + x64, toolset v141_xp)
         shell: cmd
         run: |
-          set VS_INST=%VS2022_INSTALL%
-          if not exist "%VS_INST%\VC\Auxiliary\Build\vcvars32.bat" ( echo VS tools not found under %VS_INST% & exit /b 1 )
+          if not defined VS_INST ( echo VS_INST not set: install step must export it via GITHUB_ENV & exit /b 1 )
+          if not exist "%VS_INST%\VC\Auxiliary\Build\vcvars32.bat" ( echo VS tools not found under "%VS_INST%" & exit /b 1 )
           set WXWIN=%GITHUB_WORKSPACE%\wxWidgets
 
           call "%VS_INST%\VC\Auxiliary\Build\vcvars32.bat"
