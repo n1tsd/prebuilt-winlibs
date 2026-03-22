@@ -6,6 +6,12 @@ name: wxSQLite3 Windows v141_xp
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
 
 env:
   WXSQLITE3_REPO: utelle/wxsqlite3
@@ -117,7 +123,20 @@ jobs:
       # drops wxMSVC_VERSION_AUTO / wxMSVC_VERSION_ABI_COMPAT, so include/msvc/wx/setup.h falls
       # back to vc + _lib (vc_lib) instead of vc14x_lib. Default wx_setup.props is correct for vc14x prebuilts.
 
-      - name: Build wxSQLite3 (Win32 + x64, toolset v141_xp)
+      # Upstream wx_setup.props matches "Debug DLL" / "Release DLL" (space); solution uses Debug_DLL / Release_DLL.
+      - name: Patch wx_setup.props for Release_DLL / Debug_DLL out dirs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $p = Join-Path $env:GITHUB_WORKSPACE 'wxsqlite3/build/wx_setup.props'
+          $old = '$(Configuration.StartsWith(''Debug DLL'')) or $(Configuration.StartsWith(''Release DLL''))'
+          $new = '$(Configuration.Contains(''_DLL'')) and !$(Configuration.Contains(''wxDLL''))'
+          $text = Get-Content -LiteralPath $p -Raw -Encoding utf8
+          if (-not $text.Contains($old)) { throw "wx_setup.props: expected condition substring not found" }
+          $text = $text.Replace($old, $new)
+          Set-Content -LiteralPath $p -Value $text -Encoding utf8 -NoNewline
+
+      - name: Build wxSQLite3 (static + DLL, Win32 + x64, toolset v141_xp)
         shell: cmd
         run: |
           if not defined VS_INST ( echo VS_INST not set: install step must export it via GITHUB_ENV & exit /b 1 )
@@ -128,14 +147,103 @@ jobs:
           call "%VS_INST%\VC\Auxiliary\Build\vcvars32.bat"
           msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v141_xp
           if errorlevel 1 exit /b 1
+          msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release_DLL /p:Platform=Win32 /p:PlatformToolset=v141_xp
+          if errorlevel 1 exit /b 1
 
           call "%VS_INST%\VC\Auxiliary\Build\vcvars64.bat"
           msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v141_xp
           if errorlevel 1 exit /b 1
+          msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release_DLL /p:Platform=x64 /p:PlatformToolset=v141_xp
+          if errorlevel 1 exit /b 1
 
-      - name: Upload lib output
+      - name: Assemble distribution (headers + libs + DLL + consumer props)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:GITHUB_WORKSPACE
+          $dist = Join-Path $root 'dist/wxsqlite3-v141_xp'
+          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'include/wx') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'lib/Win32/static/Release') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'lib/Win32/dll/Release') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'lib/x64/static/Release') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'lib/x64/dll/Release') | Out-Null
+
+          Copy-Item (Join-Path $root 'wxsqlite3/include/wx/*.h') -Destination (Join-Path $dist 'include/wx') -Force
+
+          $s32 = Join-Path $root 'wxsqlite3/lib/vc14x_lib/wxsqlite3.lib'
+          $s64 = Join-Path $root 'wxsqlite3/lib/vc14x_x64_lib/wxsqlite3.lib'
+          if (-not (Test-Path $s32)) { throw "Missing static Win32 lib: $s32" }
+          if (-not (Test-Path $s64)) { throw "Missing static x64 lib: $s64" }
+          Copy-Item $s32 (Join-Path $dist 'lib/Win32/static/Release/wxsqlite3.lib') -Force
+          Copy-Item $s64 (Join-Path $dist 'lib/x64/static/Release/wxsqlite3.lib') -Force
+
+          $d32 = Join-Path $root 'wxsqlite3/lib/vc14x_dll'
+          $d64 = Join-Path $root 'wxsqlite3/lib/vc14x_x64_dll'
+          foreach ($pair in @(
+            @{ Dir = $d32; Out = 'lib/Win32/dll/Release' },
+            @{ Dir = $d64; Out = 'lib/x64/dll/Release' }
+          )) {
+            $dir = $pair.Dir
+            $out = Join-Path $dist $pair.Out
+            foreach ($pat in @('wxsqlite3.dll', 'wxsqlite3.lib', 'wxsqlite3.pdb', 'wxsqlite3.exp')) {
+              $f = Join-Path $dir $pat
+              if (Test-Path $f) { Copy-Item $f $out -Force }
+            }
+            if (-not (Test-Path (Join-Path $out 'wxsqlite3.dll'))) { throw "Missing DLL under $dir" }
+            if (-not (Test-Path (Join-Path $out 'wxsqlite3.lib'))) { throw "Missing import lib under $dir" }
+          }
+
+          $propsSrc = Join-Path $root 'packaging/wxsqlite3.v141_xp.props'
+          if (-not (Test-Path $propsSrc)) { throw "Missing packaging/wxsqlite3.v141_xp.props in build repo" }
+          Copy-Item $propsSrc (Join-Path $dist 'wxsqlite3.v141_xp.props') -Force
+
+          $wxv = $env:WXWIDGETS_VER
+          $repo = $env:WXSQLITE3_REPO
+          $ref = $env:WXSQLITE3_REF
+          $readme = @"
+          wxSQLite3 预编译（MSVC v141_xp，Unicode，与 wxWidgets $wxv vc14x DLL 配套）
+
+          目录说明
+          - include/wx          公共头文件
+          - lib/Win32|x64/static/Release   静态库 wxsqlite3.lib
+          - lib/Win32|x64/dll/Release      wxsqlite3.dll、导入库 wxsqlite3.lib（及 pdb/exp 若有）
+          - wxsqlite3.v141_xp.props      供其它工程 Import 的属性表
+
+          使用 props（动态链接 wx + wxSQLite3）
+          1. 安装与构建时相同的 wxWidgets（本 CI 使用官方 wxMSW-*_vc14x*_Dev.7z + headers）。
+          2. 设置 WXWIN 为 wxWidgets 根目录（用户宏或环境变量均可）。
+          3. 在 vcxproj 合适位置加入一行 Import（路径按实际放置调整）：
+               <Import Project="...\\wxsqlite3.v141_xp.props" />
+             默认 WxSqlite3UseDll=true：会定义 WXUSINGDLL 并链接 wx 导入库；运行目录需含 wxsqlite3.dll 及 wx 的 vc14x DLL。
+
+          仅静态 wxSQLite3（WxSqlite3UseDll=false）时，仍需自行配置 wx 静态库与链接项。
+
+          上游：$repo  引用 $ref
+          "@
+          $readme.Trim() | Set-Content -LiteralPath (Join-Path $dist 'README.txt') -Encoding utf8
+
+      - name: Zip distribution for GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:GITHUB_WORKSPACE 'dist/wxsqlite3-v141_xp'
+          $tag = $env:GITHUB_REF_NAME
+          if (-not $tag) { throw "GITHUB_REF_NAME empty" }
+          $zip = Join-Path $env:GITHUB_WORKSPACE "wxsqlite3-v141_xp-$tag.zip"
+          if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force }
+          Compress-Archive -Path (Join-Path $src '*') -DestinationPath $zip -CompressionLevel Optimal
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ github.workspace }}/wxsqlite3-v141_xp-${{ github.ref_name }}.zip
+          generate_release_notes: true
+
+      - name: Upload distribution artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wxsqlite3-v141_xp-Release-static-lib
+          name: wxsqlite3-v141_xp-win32-x64-dist
           path: |
-            wxsqlite3/lib/**
+            dist/wxsqlite3-v141_xp/**
