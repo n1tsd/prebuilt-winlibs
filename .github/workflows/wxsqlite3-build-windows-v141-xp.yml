@@ -113,19 +113,9 @@ jobs:
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "WXWIN=$wxroot"
           Write-Host "WXWIN=$wxroot"
 
-      - name: Write wx_local.props (match vc14x prebuilts)
-        shell: pwsh
-        run: |
-          $xml = @'
-          <?xml version="1.0" encoding="utf-8"?>
-          <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-            <PropertyGroup Label="UserMacros">
-              <wxCompilerPrefix>vc14x</wxCompilerPrefix>
-              <wxMsvcVersionAuto></wxMsvcVersionAuto>
-            </PropertyGroup>
-          </Project>
-          '@
-          $xml | Set-Content -Encoding utf8 -Path "$env:GITHUB_WORKSPACE/wxsqlite3/build/wx_local.props"
+      # Do not add wx_local.props here: an empty wxMsvcVersionAuto overrides wx_setup.props and
+      # drops wxMSVC_VERSION_AUTO / wxMSVC_VERSION_ABI_COMPAT, so include/msvc/wx/setup.h falls
+      # back to vc + _lib (vc_lib) instead of vc14x_lib. Default wx_setup.props is correct for vc14x prebuilts.
 
       - name: Build wxSQLite3 (Win32 + x64, toolset v141_xp)
         shell: cmd
