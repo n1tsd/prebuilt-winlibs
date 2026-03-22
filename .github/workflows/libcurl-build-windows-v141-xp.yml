@@ -1,0 +1,294 @@
+# Build libcurl + curl.exe for Win32 and x64 with MSVC platform toolset v141_xp.
+# Uses official curl sources + CMake (Visual Studio 17 2022 generator, -T v141_xp).
+# TLS: Schannel (no OpenSSL). Runner: windows-latest; VS 2022 Build Tools with v141 + WinXP pack.
+
+name: libcurl Windows v141_xp
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+
+env:
+  CURL_REPO: curl/curl
+  # Use a release tag for reproducible builds, e.g. curl-8_11_0
+  CURL_REF: curl-8_11_0
+  UPLOAD_ARTIFACT: true
+  UPLOAD_RELEASE: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout build repo
+        uses: actions/checkout@v4
+
+      - name: Checkout curl
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CURL_REPO }}
+          ref: ${{ env.CURL_REF }}
+          path: curl
+
+      - name: Install Visual Studio 2022 Build Tools (C++, MSVC v141, WinXP toolset pack)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $bootstrapper = Join-Path $env:TEMP "vs_BuildTools.exe"
+          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vs_BuildTools.exe" -OutFile $bootstrapper -UseBasicParsing
+          Write-Host "Installing VS 2022 Build Tools (default path; first run can take 15-25 minutes)"
+          $args = @(
+            "--quiet", "--wait", "--norestart", "--nocache",
+            "--add", "Microsoft.VisualStudio.Workload.VCTools",
+            "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "--add", "Microsoft.VisualStudio.Component.VC.v141.x86.x64",
+            "--add", "Microsoft.VisualStudio.Component.WinXP"
+          )
+          $p = Start-Process -FilePath $bootstrapper -ArgumentList $args -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -notin 0, 3010) {
+            throw "vs_BuildTools.exe exited with $($p.ExitCode)"
+          }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $root = & $vswhere -latest -products Microsoft.VisualStudio.Product.BuildTools `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $root) {
+            throw "vswhere: no VS 2022 Build Tools with VC.Tools.x86.x64 (install may have failed or skipped C++)."
+          }
+          $vcvars32 = Join-Path $root "VC\Auxiliary\Build\vcvars32.bat"
+          if (-not (Test-Path $vcvars32)) {
+            Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+            throw "Missing VC toolchain: $vcvars32"
+          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VS_INST=$root"
+          Write-Host "Build will use VS_INST=$root"
+
+      - name: Build libcurl (CMake, static + DLL, Win32 + x64, toolset v141_xp)
+        shell: cmd
+        run: |
+          if not defined GITHUB_WORKSPACE ( echo GITHUB_WORKSPACE not set & exit /b 1 )
+          set ROOT=%GITHUB_WORKSPACE%
+          set CURL=%ROOT%\curl
+          set GEN=Visual Studio 17 2022
+          set TS=v141_xp
+          set COMMON=-DCURL_USE_SCHANNEL=ON -DCURL_ENABLE_SSL=ON -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF -DENABLE_CURL_MANUAL=OFF -DBUILD_LIBCURL_DOCS=OFF -DBUILD_MISC_DOCS=OFF
+
+          cmake -S "%CURL%" -B "%ROOT%\build\w32-dll" -G "%GEN%" -A Win32 -T %TS% ^
+            -DBUILD_SHARED_LIBS=ON -DBUILD_STATIC_LIBS=OFF %COMMON% ^
+            -DCMAKE_INSTALL_PREFIX="%ROOT%\stage\w32-dll"
+          if errorlevel 1 exit /b 1
+          cmake --build "%ROOT%\build\w32-dll" --config Release --parallel
+          if errorlevel 1 exit /b 1
+          cmake --install "%ROOT%\build\w32-dll" --config Release
+          if errorlevel 1 exit /b 1
+
+          cmake -S "%CURL%" -B "%ROOT%\build\w32-static" -G "%GEN%" -A Win32 -T %TS% ^
+            -DBUILD_SHARED_LIBS=OFF %COMMON% ^
+            -DCMAKE_INSTALL_PREFIX="%ROOT%\stage\w32-static"
+          if errorlevel 1 exit /b 1
+          cmake --build "%ROOT%\build\w32-static" --config Release --parallel
+          if errorlevel 1 exit /b 1
+          cmake --install "%ROOT%\build\w32-static" --config Release
+          if errorlevel 1 exit /b 1
+
+          cmake -S "%CURL%" -B "%ROOT%\build\x64-dll" -G "%GEN%" -A x64 -T %TS% ^
+            -DBUILD_SHARED_LIBS=ON -DBUILD_STATIC_LIBS=OFF %COMMON% ^
+            -DCMAKE_INSTALL_PREFIX="%ROOT%\stage\x64-dll"
+          if errorlevel 1 exit /b 1
+          cmake --build "%ROOT%\build\x64-dll" --config Release --parallel
+          if errorlevel 1 exit /b 1
+          cmake --install "%ROOT%\build\x64-dll" --config Release
+          if errorlevel 1 exit /b 1
+
+          cmake -S "%CURL%" -B "%ROOT%\build\x64-static" -G "%GEN%" -A x64 -T %TS% ^
+            -DBUILD_SHARED_LIBS=OFF %COMMON% ^
+            -DCMAKE_INSTALL_PREFIX="%ROOT%\stage\x64-static"
+          if errorlevel 1 exit /b 1
+          cmake --build "%ROOT%\build\x64-static" --config Release --parallel
+          if errorlevel 1 exit /b 1
+          cmake --install "%ROOT%\build\x64-static" --config Release
+          if errorlevel 1 exit /b 1
+
+      - name: Assemble distribution (headers + libs + DLL + consumer props)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:GITHUB_WORKSPACE
+          $dist = Join-Path $root 'dist/libcurl-v141_xp'
+          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'include/curl') | Out-Null
+          foreach ($rel in @(
+            'lib/Win32/static/Release',
+            'lib/Win32/dll/Release',
+            'lib/x64/static/Release',
+            'lib/x64/dll/Release'
+          )) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $dist $rel) | Out-Null
+          }
+
+          $hdr = Join-Path $root 'curl/include/curl'
+          if (-not (Test-Path $hdr)) { throw "Missing curl headers: $hdr" }
+          Copy-Item (Join-Path $hdr '*.h') -Destination (Join-Path $dist 'include/curl') -Force
+
+          function Copy-DllLayout {
+            param([string]$Stage, [string]$OutRel)
+            $bin = Join-Path $root $Stage 'bin'
+            $lib = Join-Path $root $Stage 'lib'
+            $out = Join-Path $dist $OutRel
+            $dll = Join-Path $bin 'libcurl.dll'
+            $exe = Join-Path $bin 'curl.exe'
+            if (-not (Test-Path $dll)) { throw "Missing $dll" }
+            if (-not (Test-Path $exe)) { throw "Missing $exe" }
+            Copy-Item $dll $out -Force
+            Copy-Item $exe $out -Force
+            $imp = Join-Path $lib 'libcurl_imp.lib'
+            if (-not (Test-Path $imp)) { throw "Missing import lib: $imp" }
+            Copy-Item $imp (Join-Path $out 'libcurl.lib') -Force
+            foreach ($extra in @('*.pdb', '*.exp')) {
+              Get-ChildItem -Path $lib -Filter $extra -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName $out -Force }
+              Get-ChildItem -Path $bin -Filter $extra -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName $out -Force }
+            }
+          }
+
+          function Copy-StaticLayout {
+            param([string]$Stage, [string]$OutRel)
+            $lib = Join-Path $root $Stage 'lib'
+            $bin = Join-Path $root $Stage 'bin'
+            $out = Join-Path $dist $OutRel
+            $st = Join-Path $lib 'libcurl.lib'
+            if (-not (Test-Path $st)) { throw "Missing static lib: $st" }
+            Copy-Item $st $out -Force
+            $exe = Join-Path $bin 'curl.exe'
+            if (Test-Path $exe) { Copy-Item $exe $out -Force }
+            Get-ChildItem -Path $lib -Filter '*.pdb' -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName $out -Force }
+          }
+
+          Copy-DllLayout 'stage/w32-dll' 'lib/Win32/dll/Release'
+          Copy-StaticLayout 'stage/w32-static' 'lib/Win32/static/Release'
+          Copy-DllLayout 'stage/x64-dll' 'lib/x64/dll/Release'
+          Copy-StaticLayout 'stage/x64-static' 'lib/x64/static/Release'
+
+          $propsDst = Join-Path $dist 'libcurl.v141_xp.props'
+          @(
+            '<?xml version="1.0" encoding="utf-8"?>',
+            '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">',
+            '  <PropertyGroup>',
+            '    <LibcurlRoot Condition="''$(LibcurlRoot)''==''''">$(MSBuildThisFileDirectory)</LibcurlRoot>',
+            '    <LibcurlUseDll Condition="''$(LibcurlUseDll)''==''''">true</LibcurlUseDll>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(Platform)''==''Win32''">',
+            '    <LibcurlStaticLibDir>$(LibcurlRoot)lib\Win32\static\Release</LibcurlStaticLibDir>',
+            '    <LibcurlDllLibDir>$(LibcurlRoot)lib\Win32\dll\Release</LibcurlDllLibDir>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(Platform)''==''x64''">',
+            '    <LibcurlStaticLibDir>$(LibcurlRoot)lib\x64\static\Release</LibcurlStaticLibDir>',
+            '    <LibcurlDllLibDir>$(LibcurlRoot)lib\x64\dll\Release</LibcurlDllLibDir>',
+            '  </PropertyGroup>',
+            '  <ItemDefinitionGroup>',
+            '    <ClCompile>',
+            '      <AdditionalIncludeDirectories>$(LibcurlRoot)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>',
+            '    </ClCompile>',
+            '  </ItemDefinitionGroup>',
+            '  <ItemDefinitionGroup Condition="''$(LibcurlUseDll)''==''true''">',
+            '    <Link>',
+            '      <AdditionalLibraryDirectories>$(LibcurlDllLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>',
+            '      <AdditionalDependencies>libcurl.lib;ws2_32.lib;wldap32.lib;advapi32.lib;crypt32.lib;bcrypt.lib;Normaliz.lib;%(AdditionalDependencies)</AdditionalDependencies>',
+            '    </Link>',
+            '  </ItemDefinitionGroup>',
+            '  <ItemDefinitionGroup Condition="''$(LibcurlUseDll)''!=''true''">',
+            '    <ClCompile>',
+            '      <PreprocessorDefinitions>%(PreprocessorDefinitions);CURL_STATICLIB</PreprocessorDefinitions>',
+            '    </ClCompile>',
+            '    <Link>',
+            '      <AdditionalLibraryDirectories>$(LibcurlStaticLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>',
+            '      <AdditionalDependencies>libcurl.lib;ws2_32.lib;wldap32.lib;advapi32.lib;crypt32.lib;bcrypt.lib;Normaliz.lib;%(AdditionalDependencies)</AdditionalDependencies>',
+            '    </Link>',
+            '  </ItemDefinitionGroup>',
+            '</Project>'
+          ) | Set-Content -LiteralPath $propsDst -Encoding utf8
+
+          $ref = $env:CURL_REF
+          $repo = $env:CURL_REPO
+          $readme = @"
+          libcurl prebuilt (MSVC v141_xp, Schannel TLS)
+
+          Layout
+          - include/curl              Public headers
+          - lib/Win32|x64/static/Release   Static libcurl.lib + curl.exe (if installed)
+          - lib/Win32|x64/dll/Release      libcurl.dll, import library as libcurl.lib, curl.exe
+          - libcurl.v141_xp.props   MSBuild props (Import into vcxproj)
+
+          Using the props
+          1. Set LibcurlRoot to this folder (default: directory containing the props).
+          2. LibcurlUseDll=true (default): link DLL import lib; runtime needs libcurl.dll on PATH or next to your exe.
+          3. LibcurlUseDll=false: defines CURL_STATICLIB and links static libcurl.lib.
+
+          Schannel is used for HTTPS; no OpenSSL runtime required.
+
+          Upstream: $repo ref $ref
+          "@
+          $readme.Trim() | Set-Content -LiteralPath (Join-Path $dist 'README.txt') -Encoding utf8
+
+      - name: Generate GitHub Release metadata
+        id: tag
+        if: (!cancelled())
+        shell: pwsh
+        env:
+          UPLOAD_RELEASE: ${{ env.UPLOAD_RELEASE }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:UPLOAD_RELEASE -ne 'true') {
+            "status=skip" >> $env:GITHUB_OUTPUT
+            Write-Host "UPLOAD_RELEASE is not true; skip GitHub Release."
+            exit 0
+          }
+          $ws = $env:GITHUB_WORKSPACE
+          $fileDate = Get-Date -Format 'yyyy.MM.dd-HHmm'
+          $releaseTag = "libcurl-v141_xp-$fileDate-$($env:CURL_REF)"
+          $releaseName = $releaseTag
+          $zipBase = "$releaseTag.zip"
+          $body = Join-Path $ws 'release-libcurl.txt'
+          @(
+            "libcurl Windows v141_xp prebuilt",
+            "",
+            "- curl: $($env:CURL_REPO) (ref $($env:CURL_REF))",
+            "- TLS: Schannel (Windows native)",
+            "- Platform: Win32 + x64, MSVC toolset v141_xp",
+            "",
+            "Asset: $zipBase (dist layout + README + props)"
+          ) | Set-Content -LiteralPath $body -Encoding utf8
+          "release_tag=$releaseTag" >> $env:GITHUB_OUTPUT
+          "release_name=$releaseName" >> $env:GITHUB_OUTPUT
+          "status=success" >> $env:GITHUB_OUTPUT
+          Write-Host "Release tag=$releaseTag"
+
+      - name: Zip distribution for GitHub Release
+        if: steps.tag.outputs.status == 'success' && !cancelled()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:GITHUB_WORKSPACE 'dist/libcurl-v141_xp'
+          $tag = '${{ steps.tag.outputs.release_tag }}'
+          if (-not $tag) { throw "release_tag empty" }
+          $zip = Join-Path $env:GITHUB_WORKSPACE "$tag.zip"
+          if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force }
+          Compress-Archive -Path (Join-Path $src '*') -DestinationPath $zip -CompressionLevel Optimal
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2.1.0
+        if: steps.tag.outputs.status == 'success' && !cancelled()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: ${{ steps.tag.outputs.release_name }}
+          body_path: ${{ github.workspace }}/release-libcurl.txt
+          files: ${{ github.workspace }}/${{ steps.tag.outputs.release_tag }}.zip
+
+      - name: Upload distribution artifact
+        if: env.UPLOAD_ARTIFACT == 'true' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libcurl-v141_xp-win32-x64-dist
+          path: |
+            dist/libcurl-v141_xp/**
