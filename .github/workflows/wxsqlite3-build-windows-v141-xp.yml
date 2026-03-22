@@ -89,27 +89,38 @@ jobs:
             $7z = Join-Path $env:ProgramFiles "7-Zip\7z.exe"
             if (-not (Test-Path $7z)) { throw "7-Zip not found after install: $7z" }
           }
-          $dest = $env:GITHUB_WORKSPACE
+          # Archives expand to top-level include\ and lib\ (no wxWidgets-x.y.z wrapper).
+          $wxroot = Join-Path $env:GITHUB_WORKSPACE "wxWidgets-$ver"
+          New-Item -ItemType Directory -Force -Path $wxroot | Out-Null
           foreach ($name in $names) {
             Write-Host "Extracting $name"
-            & $7z x (Join-Path $dl $name) "-o$dest" -y | Out-Null
+            & $7z x (Join-Path $dl $name) "-o$wxroot" -y | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "7z failed for $name (exit $LASTEXITCODE)" }
           }
-          $wxroot = Join-Path $dest "wxWidgets-$ver"
-          if (-not (Test-Path (Join-Path $wxroot "include"))) {
-            throw "wxWidgets tree missing include: $wxroot"
-          }
+          $inc = Join-Path $wxroot "include"
+          $lib = Join-Path $wxroot "lib"
+          if (-not (Test-Path $inc)) { throw "wxWidgets missing include\: $wxroot" }
+          if (-not (Test-Path $lib)) { throw "wxWidgets missing lib\: $wxroot" }
+          # Official Dev trees are lib\vc14x_dll and lib\vc14x_x64_dll; wxsqlite3 vcxproj hard-codes *_lib.
+          $dll32 = Join-Path $lib "vc14x_dll"
+          $dll64 = Join-Path $lib "vc14x_x64_dll"
+          $lnk32 = Join-Path $lib "vc14x_lib"
+          $lnk64 = Join-Path $lib "vc14x_x64_lib"
+          if (-not (Test-Path $dll32)) { throw "Expected prebuilt folder missing: $dll32" }
+          if (-not (Test-Path $dll64)) { throw "Expected prebuilt folder missing: $dll64" }
+          New-Item -ItemType Junction -Path $lnk32 -Target $dll32 -Force | Out-Null
+          New-Item -ItemType Junction -Path $lnk64 -Target $dll64 -Force | Out-Null
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "WXWIN=$wxroot"
           Write-Host "WXWIN=$wxroot"
 
-      - name: Write wx_local.props (vc_lib / vc_x64_lib layout)
+      - name: Write wx_local.props (match vc14x prebuilts)
         shell: pwsh
         run: |
           $xml = @'
           <?xml version="1.0" encoding="utf-8"?>
           <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
             <PropertyGroup Label="UserMacros">
-              <wxCompilerPrefix>vc</wxCompilerPrefix>
+              <wxCompilerPrefix>vc14x</wxCompilerPrefix>
               <wxMsvcVersionAuto></wxMsvcVersionAuto>
             </PropertyGroup>
           </Project>
