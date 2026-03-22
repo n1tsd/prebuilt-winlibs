@@ -1,6 +1,6 @@
-# Build wxSQLite3 for Win32 and x64 with MSVC platform toolset v141_xp. wxWidgets uses the same
-# toolset. Runner: windows-latest (no reliance on deprecated images); VS 2022 Build Tools is
-# installed in-repo via the official bootstrapper with v141 + WinXP optional components.
+# Build wxSQLite3 for Win32 and x64 with MSVC platform toolset v141_xp. wxWidgets is taken from
+# official release prebuilts (vc14x Win32+x64 Dev + headers), not built from source. Runner:
+# windows-latest; VS 2022 Build Tools via bootstrapper with v141 + WinXP optional components.
 
 name: wxSQLite3 Windows v141_xp
 
@@ -11,7 +11,8 @@ env:
   WXSQLITE3_REPO: utelle/wxsqlite3
   # upstream default is main (not master); use a tag e.g. v4.12.2 for reproducible builds
   WXSQLITE3_REF: main
-  WXWIDGETS_REF: v3.2.10
+  # Prebuilt archives from https://github.com/wxWidgets/wxWidgets/releases/tag/v3.2.10
+  WXWIDGETS_VER: "3.2.10"
 
 jobs:
   build:
@@ -61,12 +62,45 @@ jobs:
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "VS_INST=$root"
           Write-Host "Build will use VS_INST=$root"
 
-      - name: Checkout wxWidgets
-        uses: actions/checkout@v4
-        with:
-          repository: wxWidgets/wxWidgets
-          ref: ${{ env.WXWIDGETS_REF }}
-          path: wxWidgets
+      - name: Download and extract wxWidgets prebuilt (headers + vc14x Win32 + x64 Dev)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $ver = $env:WXWIDGETS_VER
+          $base = "https://github.com/wxWidgets/wxWidgets/releases/download/v$ver"
+          $names = @(
+            "wxWidgets-$ver-headers.7z",
+            "wxMSW-${ver}_vc14x_Dev.7z",
+            "wxMSW-${ver}_vc14x_x64_Dev.7z"
+          )
+          $dl = Join-Path $env:TEMP "wx-prebuilt"
+          New-Item -ItemType Directory -Force -Path $dl | Out-Null
+          foreach ($name in $names) {
+            $url = "$base/$name"
+            $out = Join-Path $dl $name
+            Write-Host "Downloading $url"
+            Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+          }
+          $7z = Join-Path $env:ProgramFiles "7-Zip\7z.exe"
+          if (-not (Test-Path $7z)) {
+            Write-Host "Installing 7-Zip..."
+            choco install 7zip -y --no-progress
+            $7z = Join-Path $env:ProgramFiles "7-Zip\7z.exe"
+            if (-not (Test-Path $7z)) { throw "7-Zip not found after install: $7z" }
+          }
+          $dest = $env:GITHUB_WORKSPACE
+          foreach ($name in $names) {
+            Write-Host "Extracting $name"
+            & $7z x (Join-Path $dl $name) "-o$dest" -y | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "7z failed for $name (exit $LASTEXITCODE)" }
+          }
+          $wxroot = Join-Path $dest "wxWidgets-$ver"
+          if (-not (Test-Path (Join-Path $wxroot "include"))) {
+            throw "wxWidgets tree missing include: $wxroot"
+          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "WXWIN=$wxroot"
+          Write-Host "WXWIN=$wxroot"
 
       - name: Write wx_local.props (vc_lib / vc_x64_lib layout)
         shell: pwsh
@@ -82,20 +116,13 @@ jobs:
           '@
           $xml | Set-Content -Encoding utf8 -Path "$env:GITHUB_WORKSPACE/wxsqlite3/build/wx_local.props"
 
-      - name: Build wxWidgets and wxSQLite3 (Win32 + x64, toolset v141_xp)
+      - name: Build wxSQLite3 (Win32 + x64, toolset v141_xp)
         shell: cmd
         run: |
           if not defined VS_INST ( echo VS_INST not set: install step must export it via GITHUB_ENV & exit /b 1 )
+          if not defined WXWIN ( echo WXWIN not set: prebuilt wxWidgets extract step must export it & exit /b 1 )
           if not exist "%VS_INST%\VC\Auxiliary\Build\vcvars32.bat" ( echo VS tools not found under "%VS_INST%" & exit /b 1 )
-          set WXWIN=%GITHUB_WORKSPACE%\wxWidgets
-
-          call "%VS_INST%\VC\Auxiliary\Build\vcvars32.bat"
-          msbuild wxWidgets\build\msw\wx_vc16.sln /m /verbosity:minimal /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v141_xp
-          if errorlevel 1 exit /b 1
-
-          call "%VS_INST%\VC\Auxiliary\Build\vcvars64.bat"
-          msbuild wxWidgets\build\msw\wx_vc16.sln /m /verbosity:minimal /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v141_xp
-          if errorlevel 1 exit /b 1
+          if not exist "%WXWIN%\include" ( echo WXWIN invalid: "%WXWIN%" & exit /b 1 )
 
           call "%VS_INST%\VC\Auxiliary\Build\vcvars32.bat"
           msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v141_xp
