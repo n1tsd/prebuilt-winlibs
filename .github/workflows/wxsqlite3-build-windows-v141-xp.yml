@@ -193,32 +193,76 @@ jobs:
             if (-not (Test-Path (Join-Path $out 'wxsqlite3.lib'))) { throw "Missing import lib under $dir" }
           }
 
-          $propsSrc = Join-Path $root 'packaging/wxsqlite3.v141_xp.props'
-          if (-not (Test-Path $propsSrc)) { throw "Missing packaging/wxsqlite3.v141_xp.props in build repo" }
-          Copy-Item $propsSrc (Join-Path $dist 'wxsqlite3.v141_xp.props') -Force
+          # wxsqlite3.v141_xp.props: single source is this workflow only; edit the YAML, not a duplicate file.
+          $propsDst = Join-Path $dist 'wxsqlite3.v141_xp.props'
+          @(
+            '<?xml version="1.0" encoding="utf-8"?>',
+            '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">',
+            '  <PropertyGroup>',
+            '    <WxSqlite3Root Condition="''$(WxSqlite3Root)''==''''">$(MSBuildThisFileDirectory)</WxSqlite3Root>',
+            '    <WxSqlite3UseDll Condition="''$(WxSqlite3UseDll)''==''''">true</WxSqlite3UseDll>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(Platform)''==''Win32''">',
+            '    <WxSqlite3IncSubDir>mswu</WxSqlite3IncSubDir>',
+            '    <WxSqlite3WxLibSubDir>vc14x_dll</WxSqlite3WxLibSubDir>',
+            '    <WxSqlite3StaticLibDir>$(WxSqlite3Root)lib\Win32\static\Release</WxSqlite3StaticLibDir>',
+            '    <WxSqlite3DllLibDir>$(WxSqlite3Root)lib\Win32\dll\Release</WxSqlite3DllLibDir>',
+            '    <WxSqlite3WxImportLibs>wxmsw32u_core.lib;wxbase32u.lib;wxtiff.lib;wxjpeg.lib;wxpng.lib;wxregexu.lib;wxexpat.lib;wxzlib.lib</WxSqlite3WxImportLibs>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(Platform)''==''x64''">',
+            '    <WxSqlite3IncSubDir>mswu</WxSqlite3IncSubDir>',
+            '    <WxSqlite3WxLibSubDir>vc14x_x64_dll</WxSqlite3WxLibSubDir>',
+            '    <WxSqlite3StaticLibDir>$(WxSqlite3Root)lib\x64\static\Release</WxSqlite3StaticLibDir>',
+            '    <WxSqlite3DllLibDir>$(WxSqlite3Root)lib\x64\dll\Release</WxSqlite3DllLibDir>',
+            '    <WxSqlite3WxImportLibs>wxmsw32u_core.lib;wxbase32u.lib;wxtiff.lib;wxjpeg.lib;wxpng.lib;wxregexu.lib;wxexpat.lib;wxzlib.lib</WxSqlite3WxImportLibs>',
+            '  </PropertyGroup>',
+            '  <ItemDefinitionGroup>',
+            '    <ClCompile>',
+            '      <PreprocessorDefinitions>%(PreprocessorDefinitions);wxMSVC_VERSION_AUTO;wxMSVC_VERSION_ABI_COMPAT</PreprocessorDefinitions>',
+            '      <AdditionalIncludeDirectories>$(WxSqlite3Root)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>',
+            '    </ClCompile>',
+            '  </ItemDefinitionGroup>',
+            '  <ItemDefinitionGroup Condition="''$(WxSqlite3UseDll)''==''true''">',
+            '    <ClCompile>',
+            '      <PreprocessorDefinitions>%(PreprocessorDefinitions);WXUSINGDLL</PreprocessorDefinitions>',
+            '      <AdditionalIncludeDirectories>$(WXWIN)\include\msvc;$(WXWIN)\lib\$(WxSqlite3WxLibSubDir)\$(WxSqlite3IncSubDir);$(WXWIN)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>',
+            '    </ClCompile>',
+            '    <Link>',
+            '      <AdditionalLibraryDirectories>$(WxSqlite3DllLibDir);$(WXWIN)\lib\$(WxSqlite3WxLibSubDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>',
+            '      <AdditionalDependencies>wxsqlite3.lib;$(WxSqlite3WxImportLibs);%(AdditionalDependencies)</AdditionalDependencies>',
+            '    </Link>',
+            '  </ItemDefinitionGroup>',
+            '  <ItemDefinitionGroup Condition="''$(WxSqlite3UseDll)''!=''true''">',
+            '    <Link>',
+            '      <AdditionalLibraryDirectories>$(WxSqlite3StaticLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>',
+            '      <AdditionalDependencies>wxsqlite3.lib;%(AdditionalDependencies)</AdditionalDependencies>',
+            '    </Link>',
+            '  </ItemDefinitionGroup>',
+            '</Project>'
+          ) | Set-Content -LiteralPath $propsDst -Encoding utf8
 
           $wxv = $env:WXWIDGETS_VER
           $repo = $env:WXSQLITE3_REPO
           $ref = $env:WXSQLITE3_REF
           $readme = @"
-          wxSQLite3 预编译（MSVC v141_xp，Unicode，与 wxWidgets $wxv vc14x DLL 配套）
+          wxSQLite3 prebuilt binaries (MSVC v141_xp, Unicode, wxWidgets $wxv vc14x DLL layout)
 
-          目录说明
-          - include/wx          公共头文件
-          - lib/Win32|x64/static/Release   静态库 wxsqlite3.lib
-          - lib/Win32|x64/dll/Release      wxsqlite3.dll、导入库 wxsqlite3.lib（及 pdb/exp 若有）
-          - wxsqlite3.v141_xp.props      供其它工程 Import 的属性表
+          Layout
+          - include/wx                     Public headers
+          - lib/Win32|x64/static/Release   Static wxsqlite3.lib
+          - lib/Win32|x64/dll/Release      wxsqlite3.dll, import library wxsqlite3.lib (pdb/exp if present)
+          - wxsqlite3.v141_xp.props        MSBuild props for consumers (Import into vcxproj)
 
-          使用 props（动态链接 wx + wxSQLite3）
-          1. 安装与构建时相同的 wxWidgets（本 CI 使用官方 wxMSW-*_vc14x*_Dev.7z + headers）。
-          2. 设置 WXWIN 为 wxWidgets 根目录（用户宏或环境变量均可）。
-          3. 在 vcxproj 合适位置加入一行 Import（路径按实际放置调整）：
+          Using the props (dynamic wx + dynamic wxSQLite3)
+          1. Install the same wxWidgets as CI (official wxMSW-*_vc14x*_Dev.7z + headers).
+          2. Set WXWIN to the wxWidgets root (user macro or environment variable).
+          3. Add an Import in your vcxproj (adjust the path):
                <Import Project="...\\wxsqlite3.v141_xp.props" />
-             默认 WxSqlite3UseDll=true：会定义 WXUSINGDLL 并链接 wx 导入库；运行目录需含 wxsqlite3.dll 及 wx 的 vc14x DLL。
+             Default WxSqlite3UseDll=true defines WXUSINGDLL and links wx import libs; runtime dir needs wxsqlite3.dll and wx vc14x DLLs.
 
-          仅静态 wxSQLite3（WxSqlite3UseDll=false）时，仍需自行配置 wx 静态库与链接项。
+          WxSqlite3UseDll=false links only static wxsqlite3.lib; you must still configure wx static libs and link settings yourself.
 
-          上游：$repo  引用 $ref
+          Upstream: $repo ref $ref
           "@
           $readme.Trim() | Set-Content -LiteralPath (Join-Path $dist 'README.txt') -Encoding utf8
 
