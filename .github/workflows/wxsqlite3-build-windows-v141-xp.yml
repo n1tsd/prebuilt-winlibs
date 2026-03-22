@@ -5,23 +5,8 @@
 name: wxSQLite3 Windows v141_xp
 
 on:
+  repository_dispatch:
   workflow_dispatch:
-    inputs:
-      publish_github_release:
-        description: 'Upload dist zip to a GitHub Release (tag must already exist on the remote)'
-        type: boolean
-        default: false
-      release_tag:
-        description: 'Tag for the release (e.g. v1.0.0). Required when publish_github_release is true.'
-        type: string
-        required: false
-        default: ''
-  push:
-    tags:
-      - 'v*'
-
-permissions:
-  contents: write
 
 env:
   WXSQLITE3_REPO: utelle/wxsqlite3
@@ -29,10 +14,15 @@ env:
   WXSQLITE3_REF: main
   # Prebuilt archives from https://github.com/wxWidgets/wxWidgets/releases/tag/v3.2.10
   WXWIDGETS_VER: "3.2.10"
+  # Toggle uploads (same idea as P3TERX/Actions-OpenWrt style workflows)
+  UPLOAD_ARTIFACT: true
+  UPLOAD_RELEASE: true
 
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout build repo
         uses: actions/checkout@v4
@@ -276,57 +266,64 @@ jobs:
           "@
           $readme.Trim() | Set-Content -LiteralPath (Join-Path $dist 'README.txt') -Encoding utf8
 
-      # workflow_dispatch uses refs/heads/* so startsWith(github.ref, 'refs/tags/v') is false; tag push uses refs/tags/v*.
-      - name: Resolve GitHub Release tag
-        id: release_meta
+      - name: Generate GitHub Release metadata
+        id: tag
+        if: (!cancelled())
         shell: pwsh
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          REF: ${{ github.ref }}
-          REF_NAME: ${{ github.ref_name }}
-          WF_PUBLISH: ${{ github.event.inputs.publish_github_release || 'false' }}
-          WF_TAG: ${{ github.event.inputs.release_tag || '' }}
+          UPLOAD_RELEASE: ${{ env.UPLOAD_RELEASE }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $publish = 'false'
-          $tag = ''
-          if ($env:EVENT_NAME -eq 'push' -and $env:REF -match '^refs/tags/v') {
-            $publish = 'true'
-            $tag = $env:REF_NAME
+          if ($env:UPLOAD_RELEASE -ne 'true') {
+            "status=skip" >> $env:GITHUB_OUTPUT
+            Write-Host "UPLOAD_RELEASE is not true; skip GitHub Release."
+            exit 0
           }
-          elseif ($env:EVENT_NAME -eq 'workflow_dispatch') {
-            if ($env:WF_PUBLISH -eq 'true') {
-              $t = $env:WF_TAG.Trim()
-              if (-not $t) { throw "publish_github_release is true but release_tag is empty" }
-              $publish = 'true'
-              $tag = $t
-            }
-          }
-          "publish=$publish" >> $env:GITHUB_OUTPUT
-          "tag=$tag" >> $env:GITHUB_OUTPUT
-          Write-Host "GitHub Release: publish=$publish tag=$tag"
+          $ws = $env:GITHUB_WORKSPACE
+          $fileDate = Get-Date -Format 'yyyy.MM.dd-HHmm'
+          $releaseTag = "wxsqlite3-v141_xp-$fileDate-wx$($env:WXWIDGETS_VER)"
+          $releaseName = $releaseTag
+          $zipBase = "$releaseTag.zip"
+          $body = Join-Path $ws 'release.txt'
+          @(
+            "wxSQLite3 Windows v141_xp prebuilt",
+            "",
+            "- wxSQLite3: $($env:WXSQLITE3_REPO) (ref $($env:WXSQLITE3_REF))",
+            "- wxWidgets: $($env:WXWIDGETS_VER) (official vc14x Dev + headers)",
+            "- Platform: Win32 + x64, MSVC toolset v141_xp",
+            "",
+            "Asset: $zipBase (dist layout + README + props)"
+          ) | Set-Content -LiteralPath $body -Encoding utf8
+          "release_tag=$releaseTag" >> $env:GITHUB_OUTPUT
+          "release_name=$releaseName" >> $env:GITHUB_OUTPUT
+          "status=success" >> $env:GITHUB_OUTPUT
+          Write-Host "Release tag=$releaseTag"
 
       - name: Zip distribution for GitHub Release
-        if: steps.release_meta.outputs.publish == 'true'
+        if: steps.tag.outputs.status == 'success' && !cancelled()
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $src = Join-Path $env:GITHUB_WORKSPACE 'dist/wxsqlite3-v141_xp'
-          $tag = '${{ steps.release_meta.outputs.tag }}'
-          if (-not $tag) { throw "Release tag empty" }
-          $zip = Join-Path $env:GITHUB_WORKSPACE "wxsqlite3-v141_xp-$tag.zip"
+          $tag = '${{ steps.tag.outputs.release_tag }}'
+          if (-not $tag) { throw "release_tag empty" }
+          $zip = Join-Path $env:GITHUB_WORKSPACE "$tag.zip"
           if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force }
           Compress-Archive -Path (Join-Path $src '*') -DestinationPath $zip -CompressionLevel Optimal
 
-      - name: Publish GitHub Release
-        if: steps.release_meta.outputs.publish == 'true'
-        uses: softprops/action-gh-release@v2
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2.1.0
+        if: steps.tag.outputs.status == 'success' && !cancelled()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ steps.release_meta.outputs.tag }}
-          files: ${{ github.workspace }}/wxsqlite3-v141_xp-${{ steps.release_meta.outputs.tag }}.zip
-          generate_release_notes: true
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: ${{ steps.tag.outputs.release_name }}
+          body_path: ${{ github.workspace }}/release.txt
+          files: ${{ github.workspace }}/${{ steps.tag.outputs.release_tag }}.zip
 
       - name: Upload distribution artifact
+        if: env.UPLOAD_ARTIFACT == 'true' && !cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: wxsqlite3-v141_xp-win32-x64-dist
