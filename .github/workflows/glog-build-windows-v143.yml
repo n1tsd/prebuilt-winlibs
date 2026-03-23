@@ -90,15 +90,14 @@ jobs:
                 $stg = Join-Path $root ("stage\" + $key)
 
                 cmake -S $src -B $bld -G $gen -A $a.CmakeArch -T $toolset `
-                  -DCMAKE_GENERATOR_INSTANCE="$env:VS_INST" `
-                  -DCMAKE_POLICY_DEFAULT_CMP0091=NEW `
+                  "-DCMAKE_GENERATOR_INSTANCE=$env:VS_INST" `
                   -DCMAKE_CXX_STANDARD=17 `
                   -DCMAKE_CXX_STANDARD_REQUIRED=ON `
                   "-DCMAKE_MSVC_RUNTIME_LIBRARY=$($t.RuntimeValue)" `
                   "-DBUILD_SHARED_LIBS=$($k.Shared)" `
                   -DBUILD_TESTING=OFF `
                   -DWITH_GFLAGS=OFF `
-                  -DCMAKE_INSTALL_PREFIX=$stg
+                  "-DCMAKE_INSTALL_PREFIX=$stg"
                 if ($LASTEXITCODE -ne 0) { throw "Configure failed for $key" }
 
                 cmake --build $bld --config $t.Config --parallel
