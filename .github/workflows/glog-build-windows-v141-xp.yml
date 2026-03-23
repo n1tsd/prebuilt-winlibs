@@ -66,6 +66,7 @@ jobs:
           $src = Join-Path $root "glog"
           $gen = "Visual Studio 17 2022"
           $toolset = "v141_xp"
+          if (-not $env:VS_INST) { throw "VS_INST not set" }
 
           $targets = @(
             @{ Runtime = "mt";  RuntimeValue = "MultiThreaded";          Config = "Release" },
@@ -90,9 +91,10 @@ jobs:
                 $stg = Join-Path $root ("stage\" + $key)
 
                 cmake -S $src -B $bld -G $gen -A $a.CmakeArch -T $toolset `
+                  -DCMAKE_GENERATOR_INSTANCE="$env:VS_INST" `
                   -DCMAKE_POLICY_DEFAULT_CMP0091=NEW `
-                  -DCMAKE_MSVC_RUNTIME_LIBRARY=$($t.RuntimeValue) `
-                  -DBUILD_SHARED_LIBS=$($k.Shared) `
+                  "-DCMAKE_MSVC_RUNTIME_LIBRARY=$($t.RuntimeValue)" `
+                  "-DBUILD_SHARED_LIBS=$($k.Shared)" `
                   -DBUILD_TESTING=OFF `
                   -DWITH_GFLAGS=OFF `
                   -DCMAKE_INSTALL_PREFIX=$stg
@@ -219,7 +221,7 @@ jobs:
 
       - name: Generate GitHub Release metadata
         id: tag
-        if: (!cancelled())
+        if: success() && !cancelled()
         shell: pwsh
         env:
           UPLOAD_RELEASE: ${{ env.UPLOAD_RELEASE }}
@@ -252,7 +254,7 @@ jobs:
           Write-Host "Release tag=$releaseTag"
 
       - name: Zip distribution for GitHub Release
-        if: steps.tag.outputs.status == 'success' && !cancelled()
+        if: success() && steps.tag.outputs.status == 'success' && !cancelled()
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -265,7 +267,7 @@ jobs:
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2.1.0
-        if: steps.tag.outputs.status == 'success' && !cancelled()
+        if: success() && steps.tag.outputs.status == 'success' && !cancelled()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -275,7 +277,7 @@ jobs:
           files: ${{ github.workspace }}/${{ steps.tag.outputs.release_tag }}.zip
 
       - name: Upload distribution artifact
-        if: env.UPLOAD_ARTIFACT == 'true' && !cancelled()
+        if: success() && env.UPLOAD_ARTIFACT == 'true' && !cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: glog-v141_xp-win32-x64-runtime-matrix
