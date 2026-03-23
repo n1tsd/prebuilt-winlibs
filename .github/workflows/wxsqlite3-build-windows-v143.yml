@@ -1,8 +1,8 @@
-# Build wxSQLite3 for Win32 and x64 with MSVC platform toolset v141_xp. wxWidgets is taken from
+# Build wxSQLite3 for Win32 and x64 with MSVC platform toolset v143. wxWidgets is taken from
 # official release prebuilts (vc14x Win32+x64 Dev + headers), not built from source. Runner:
-# windows-latest; VS 2022 Build Tools via bootstrapper with v141 + WinXP optional components.
+# windows-latest; VS 2022 Build Tools via bootstrapper with v143 components.
 
-name: wxSQLite3 Windows v141_xp
+name: wxSQLite3 Windows v143
 
 on:
   repository_dispatch:
@@ -34,7 +34,7 @@ jobs:
           ref: ${{ env.WXSQLITE3_REF }}
           path: wxsqlite3
 
-      - name: Install Visual Studio 2022 Build Tools (C++, MSVC v141, WinXP toolset pack)
+      - name: Install Visual Studio 2022 Build Tools (C++, MSVC v143)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -47,8 +47,7 @@ jobs:
             "--quiet", "--wait", "--norestart", "--nocache",
             "--add", "Microsoft.VisualStudio.Workload.VCTools",
             "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-            "--add", "Microsoft.VisualStudio.Component.VC.v141.x86.x64",
-            "--add", "Microsoft.VisualStudio.Component.WinXP"
+            "--add", "Microsoft.VisualStudio.Component.VC.v143.x86.x64"
           )
           $p = Start-Process -FilePath $bootstrapper -ArgumentList $args -Wait -PassThru -NoNewWindow
           if ($p.ExitCode -notin 0, 3010) {
@@ -136,7 +135,7 @@ jobs:
           $text = $text.Replace($old, $new)
           Set-Content -LiteralPath $p -Value $text -Encoding utf8 -NoNewline
 
-      - name: Build wxSQLite3 (static + DLL, Win32 + x64, toolset v141_xp)
+      - name: Build wxSQLite3 (static + DLL, Win32 + x64, toolset v143)
         shell: cmd
         run: |
           if not defined VS_INST ( echo VS_INST not set: install step must export it via GITHUB_ENV & exit /b 1 )
@@ -145,15 +144,15 @@ jobs:
           if not exist "%WXWIN%\include" ( echo WXWIN invalid: "%WXWIN%" & exit /b 1 )
 
           call "%VS_INST%\VC\Auxiliary\Build\vcvars32.bat"
-          msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v141_xp
+          msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
           if errorlevel 1 exit /b 1
-          msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release_DLL /p:Platform=Win32 /p:PlatformToolset=v141_xp
+          msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release_DLL /p:Platform=Win32 /p:PlatformToolset=v143
           if errorlevel 1 exit /b 1
 
           call "%VS_INST%\VC\Auxiliary\Build\vcvars64.bat"
-          msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v141_xp
+          msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143
           if errorlevel 1 exit /b 1
-          msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release_DLL /p:Platform=x64 /p:PlatformToolset=v141_xp
+          msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release_DLL /p:Platform=x64 /p:PlatformToolset=v143
           if errorlevel 1 exit /b 1
 
       - name: Assemble distribution (headers + libs + DLL + consumer props)
@@ -161,7 +160,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $root = $env:GITHUB_WORKSPACE
-          $dist = Join-Path $root 'dist/wxsqlite3-v141_xp'
+          $dist = Join-Path $root 'dist/wxsqlite3-v143'
           New-Item -ItemType Directory -Force -Path (Join-Path $dist 'include/wx') | Out-Null
           New-Item -ItemType Directory -Force -Path (Join-Path $dist 'lib/Win32/static/Release') | Out-Null
           New-Item -ItemType Directory -Force -Path (Join-Path $dist 'lib/Win32/dll/Release') | Out-Null
@@ -193,8 +192,8 @@ jobs:
             if (-not (Test-Path (Join-Path $out 'wxsqlite3.lib'))) { throw "Missing import lib under $dir" }
           }
 
-          # wxsqlite3.v141_xp.props: single source is this workflow only; edit the YAML, not a duplicate file.
-          $propsDst = Join-Path $dist 'wxsqlite3.v141_xp.props'
+          # wxsqlite3.v143.props: single source is this workflow only; edit the YAML, not a duplicate file.
+          $propsDst = Join-Path $dist 'wxsqlite3.v143.props'
           @(
             '<?xml version="1.0" encoding="utf-8"?>',
             '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">',
@@ -245,19 +244,19 @@ jobs:
           $repo = $env:WXSQLITE3_REPO
           $ref = $env:WXSQLITE3_REF
           $readme = @"
-          wxSQLite3 prebuilt binaries (MSVC v141_xp, Unicode, wxWidgets $wxv vc14x DLL layout)
+          wxSQLite3 prebuilt binaries (MSVC v143, Unicode, wxWidgets $wxv vc14x DLL layout)
 
           Layout
           - include/wx                     Public headers
           - lib/Win32|x64/static/Release   Static wxsqlite3.lib
           - lib/Win32|x64/dll/Release      wxsqlite3.dll, import library wxsqlite3.lib (pdb/exp if present)
-          - wxsqlite3.v141_xp.props        MSBuild props for consumers (Import into vcxproj)
+          - wxsqlite3.v143.props        MSBuild props for consumers (Import into vcxproj)
 
           Using the props (dynamic wx + dynamic wxSQLite3)
           1. Install the same wxWidgets as CI (official wxMSW-*_vc14x*_Dev.7z + headers).
           2. Set WXWIN to the wxWidgets root (user macro or environment variable).
           3. Add an Import in your vcxproj (adjust the path):
-               <Import Project="...\\wxsqlite3.v141_xp.props" />
+               <Import Project="...\\wxsqlite3.v143.props" />
              Default WxSqlite3UseDll=true defines WXUSINGDLL and links wx import libs; runtime dir needs wxsqlite3.dll and wx vc14x DLLs.
 
           WxSqlite3UseDll=false links only static wxsqlite3.lib; you must still configure wx static libs and link settings yourself.
@@ -281,16 +280,16 @@ jobs:
           }
           $ws = $env:GITHUB_WORKSPACE
           $fileDate = Get-Date -Format 'yyyy.MM.dd-HHmm'
-          $releaseTag = "wxsqlite3-v141_xp-$fileDate-wx$($env:WXWIDGETS_VER)"
+          $releaseTag = "wxsqlite3-v143-$fileDate-wx$($env:WXWIDGETS_VER)"
           $releaseName = $releaseTag
           $zipBase = "$releaseTag.zip"
           $body = Join-Path $ws 'release.txt'
           @(
-            "wxSQLite3 Windows v141_xp prebuilt",
+            "wxSQLite3 Windows v143 prebuilt",
             "",
             "- wxSQLite3: $($env:WXSQLITE3_REPO) (ref $($env:WXSQLITE3_REF))",
             "- wxWidgets: $($env:WXWIDGETS_VER) (official vc14x Dev + headers)",
-            "- Platform: Win32 + x64, MSVC toolset v141_xp",
+            "- Platform: Win32 + x64, MSVC toolset v143",
             "",
             "Asset: $zipBase (dist layout + README + props)"
           ) | Set-Content -LiteralPath $body -Encoding utf8
@@ -304,7 +303,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $src = Join-Path $env:GITHUB_WORKSPACE 'dist/wxsqlite3-v141_xp'
+          $src = Join-Path $env:GITHUB_WORKSPACE 'dist/wxsqlite3-v143'
           $tag = '${{ steps.tag.outputs.release_tag }}'
           if (-not $tag) { throw "release_tag empty" }
           $zip = Join-Path $env:GITHUB_WORKSPACE "$tag.zip"
@@ -326,6 +325,6 @@ jobs:
         if: env.UPLOAD_ARTIFACT == 'true' && !cancelled()
         uses: actions/upload-artifact@v4
         with:
-          name: wxsqlite3-v141_xp-win32-x64-dist
+          name: wxsqlite3-v143-win32-x64-dist
           path: |
-            dist/wxsqlite3-v141_xp/**
+            dist/wxsqlite3-v143/**

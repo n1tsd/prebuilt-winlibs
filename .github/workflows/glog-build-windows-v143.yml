@@ -1,4 +1,4 @@
-name: glog Windows v141_xp
+name: glog Windows v143
 
 on:
   repository_dispatch:
@@ -26,20 +26,7 @@ jobs:
           ref: ${{ env.GLOG_REF }}
           path: glog
 
-      - name: Patch glog CMake standard to C++17
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $cmake = Join-Path $env:GITHUB_WORKSPACE 'glog/CMakeLists.txt'
-          if (-not (Test-Path $cmake)) { throw "Missing file: $cmake" }
-          $txt = Get-Content -LiteralPath $cmake -Raw -Encoding utf8
-          if (-not $txt.Contains('cxx_std_14')) {
-            throw "Expected cxx_std_14 not found in glog/CMakeLists.txt"
-          }
-          $txt = $txt.Replace('cxx_std_14', 'cxx_std_17')
-          Set-Content -LiteralPath $cmake -Value $txt -Encoding utf8 -NoNewline
-
-      - name: Install Visual Studio 2022 Build Tools (C++, MSVC v141, WinXP toolset pack)
+      - name: Install Visual Studio 2022 Build Tools (C++, MSVC v143)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -51,8 +38,7 @@ jobs:
             "--quiet", "--wait", "--norestart", "--nocache",
             "--add", "Microsoft.VisualStudio.Workload.VCTools",
             "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-            "--add", "Microsoft.VisualStudio.Component.VC.v141.x86.x64",
-            "--add", "Microsoft.VisualStudio.Component.WinXP"
+            "--add", "Microsoft.VisualStudio.Component.VC.v143.x86.x64"
           )
           $p = Start-Process -FilePath $bootstrapper -ArgumentList $args -Wait -PassThru -NoNewWindow
           if ($p.ExitCode -notin 0, 3010) {
@@ -71,14 +57,14 @@ jobs:
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "VS_INST=$root"
           Write-Host "Build will use VS_INST=$root"
 
-      - name: Build glog (mt/mtd/md/mdd, static + dll, Win32 + x64, toolset v141_xp)
+      - name: Build glog (mt/mtd/md/mdd, static + dll, Win32 + x64, toolset v143)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $root = $env:GITHUB_WORKSPACE
           $src = Join-Path $root "glog"
           $gen = "Visual Studio 17 2022"
-          $toolset = "v141_xp"
+          $toolset = "v143"
           if (-not $env:VS_INST) { throw "VS_INST not set" }
 
           $targets = @(
@@ -129,7 +115,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $root = $env:GITHUB_WORKSPACE
-          $dist = Join-Path $root 'dist/glog-v141_xp'
+          $dist = Join-Path $root 'dist/glog-v143'
           New-Item -ItemType Directory -Force -Path (Join-Path $dist 'include/glog') | Out-Null
 
           $archs = @("Win32", "x64")
@@ -163,7 +149,7 @@ jobs:
             }
           }
 
-          $propsDst = Join-Path $dist 'glog.v141_xp.props'
+          $propsDst = Join-Path $dist 'glog.v143.props'
           @(
             '<?xml version="1.0" encoding="utf-8"?>',
             '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">',
@@ -211,7 +197,7 @@ jobs:
           ) | Set-Content -LiteralPath $propsDst -Encoding utf8
 
           $readme = @"
-          glog prebuilt binaries (MSVC v141_xp)
+          glog prebuilt binaries (MSVC v143)
 
           Matrix
           - Platform: Win32 + x64
@@ -221,10 +207,10 @@ jobs:
           Layout
           - include/glog
           - lib/{Win32|x64}/{static|dll}/{mt|mtd|md|mdd}
-          - glog.v141_xp.props
+          - glog.v143.props
 
           Using the props
-          - Import glog.v141_xp.props in your vcxproj.
+          - Import glog.v143.props in your vcxproj.
           - GlogUseDll=true (default) links DLL import library.
           - GlogUseDll=false links static library.
           - Runtime is auto-detected from RuntimeLibrary (MT/MTd/MD/MDd).
@@ -249,15 +235,15 @@ jobs:
           }
           $ws = $env:GITHUB_WORKSPACE
           $fileDate = Get-Date -Format 'yyyy.MM.dd-HHmm'
-          $releaseTag = "glog-v141_xp-$fileDate-$($env:GLOG_REF)"
+          $releaseTag = "glog-v143-$fileDate-$($env:GLOG_REF)"
           $releaseName = $releaseTag
           $zipBase = "$releaseTag.zip"
           $body = Join-Path $ws 'release-glog.txt'
           @(
-            "glog Windows v141_xp prebuilt",
+            "glog Windows v143 prebuilt",
             "",
             "- glog: $($env:GLOG_REPO) (ref $($env:GLOG_REF))",
-            "- Platform: Win32 + x64, MSVC toolset v141_xp",
+            "- Platform: Win32 + x64, MSVC toolset v143",
             "- Runtime matrix: mt/mtd/md/mdd",
             "- Linkage matrix: static + dll",
             "",
@@ -273,7 +259,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $src = Join-Path $env:GITHUB_WORKSPACE 'dist/glog-v141_xp'
+          $src = Join-Path $env:GITHUB_WORKSPACE 'dist/glog-v143'
           $tag = '${{ steps.tag.outputs.release_tag }}'
           if (-not $tag) { throw "release_tag empty" }
           $zip = Join-Path $env:GITHUB_WORKSPACE "$tag.zip"
@@ -295,6 +281,6 @@ jobs:
         if: success() && env.UPLOAD_ARTIFACT == 'true' && !cancelled()
         uses: actions/upload-artifact@v4
         with:
-          name: glog-v141_xp-win32-x64-runtime-matrix
+          name: glog-v143-win32-x64-runtime-matrix
           path: |
-            dist/glog-v141_xp/**
+            dist/glog-v143/**
