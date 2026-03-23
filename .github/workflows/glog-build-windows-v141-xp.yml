@@ -26,6 +26,19 @@ jobs:
           ref: ${{ env.GLOG_REF }}
           path: glog
 
+      - name: Patch glog CMake standard to C++17
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cmake = Join-Path $env:GITHUB_WORKSPACE 'glog/CMakeLists.txt'
+          if (-not (Test-Path $cmake)) { throw "Missing file: $cmake" }
+          $txt = Get-Content -LiteralPath $cmake -Raw -Encoding utf8
+          if (-not $txt.Contains('cxx_std_14')) {
+            throw "Expected cxx_std_14 not found in glog/CMakeLists.txt"
+          }
+          $txt = $txt.Replace('cxx_std_14', 'cxx_std_17')
+          Set-Content -LiteralPath $cmake -Value $txt -Encoding utf8 -NoNewline
+
       - name: Install Visual Studio 2022 Build Tools (C++, MSVC v141, WinXP toolset pack)
         shell: pwsh
         run: |
