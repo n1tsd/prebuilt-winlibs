@@ -93,6 +93,8 @@ jobs:
                 cmake -S $src -B $bld -G $gen -A $a.CmakeArch -T $toolset `
                   -DCMAKE_GENERATOR_INSTANCE="$env:VS_INST" `
                   -DCMAKE_POLICY_DEFAULT_CMP0091=NEW `
+                  -DCMAKE_CXX_STANDARD=17 `
+                  -DCMAKE_CXX_STANDARD_REQUIRED=ON `
                   "-DCMAKE_MSVC_RUNTIME_LIBRARY=$($t.RuntimeValue)" `
                   "-DBUILD_SHARED_LIBS=$($k.Shared)" `
                   -DBUILD_TESTING=OFF `
