@@ -91,8 +91,8 @@ jobs:
 
                 cmake -S $src -B $bld -G $gen -A $a.CmakeArch -T $toolset `
                   -DCMAKE_POLICY_DEFAULT_CMP0091=NEW `
-                  -DCMAKE_MSVC_RUNTIME_LIBRARY=$t.RuntimeValue `
-                  -DBUILD_SHARED_LIBS=$k.Shared `
+                  -DCMAKE_MSVC_RUNTIME_LIBRARY=$($t.RuntimeValue) `
+                  -DBUILD_SHARED_LIBS=$($k.Shared) `
                   -DBUILD_TESTING=OFF `
                   -DWITH_GFLAGS=OFF `
                   -DCMAKE_INSTALL_PREFIX=$stg
