@@ -109,7 +109,7 @@ jobs:
             }
           }
 
-      - name: Assemble distribution (headers + libs + dll per runtime + props)
+      - name: Assemble distribution (headers + libs + dll with runtime suffix + props)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -123,9 +123,7 @@ jobs:
 
           foreach ($a in $archs) {
             foreach ($k in $kinds) {
-              foreach ($rt in $runtimes) {
-                New-Item -ItemType Directory -Force -Path (Join-Path $dist ("lib/{0}/{1}/{2}" -f $a, $k, $rt)) | Out-Null
-              }
+              New-Item -ItemType Directory -Force -Path (Join-Path $dist ("lib/{0}/{1}" -f $a, $k)) | Out-Null
             }
           }
 
@@ -135,14 +133,20 @@ jobs:
             $aKey = $a.ToLowerInvariant()
             foreach ($k in $kinds) {
               foreach ($rt in $runtimes) {
-                $out = Join-Path $dist ("lib/{0}/{1}/{2}" -f $a, $k, $rt)
+                $out = Join-Path $dist ("lib/{0}/{1}" -f $a, $k)
                 $stg = Join-Path $root ("stage/{0}-{1}-{2}" -f $aKey, $k, $rt)
                 $bin = Join-Path $stg "bin"
                 $lib = Join-Path $stg "lib"
                 if (-not (Test-Path $lib)) { throw "Missing install lib directory: $lib" }
-                Get-ChildItem -LiteralPath $lib -File | ForEach-Object { Copy-Item $_.FullName $out -Force }
+                Get-ChildItem -LiteralPath $lib -File | ForEach-Object {
+                  $dst = "{0}_{1}{2}" -f $_.BaseName, $rt, $_.Extension
+                  Copy-Item $_.FullName (Join-Path $out $dst) -Force
+                }
                 if (Test-Path $bin) {
-                  Get-ChildItem -LiteralPath $bin -File | ForEach-Object { Copy-Item $_.FullName $out -Force }
+                  Get-ChildItem -LiteralPath $bin -File | ForEach-Object {
+                    $dst = "{0}_{1}{2}" -f $_.BaseName, $rt, $_.Extension
+                    Copy-Item $_.FullName (Join-Path $out $dst) -Force
+                  }
                 }
               }
             }
@@ -178,10 +182,16 @@ jobs:
             '    <GlogRuntimeDir>md</GlogRuntimeDir>',
             '  </PropertyGroup>',
             '  <PropertyGroup Condition="''$(GlogUseDll)''==''true''">',
-            '    <GlogLibDir>$(GlogRoot)lib\$(GlogPlatformDir)\dll\$(GlogRuntimeDir)</GlogLibDir>',
+            '    <GlogLibDir>$(GlogRoot)lib\$(GlogPlatformDir)\dll</GlogLibDir>',
             '  </PropertyGroup>',
             '  <PropertyGroup Condition="''$(GlogUseDll)''!=''true''">',
-            '    <GlogLibDir>$(GlogRoot)lib\$(GlogPlatformDir)\static\$(GlogRuntimeDir)</GlogLibDir>',
+            '    <GlogLibDir>$(GlogRoot)lib\$(GlogPlatformDir)\static</GlogLibDir>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(GlogRuntimeDir)''==''mtd'' or ''$(GlogRuntimeDir)''==''mdd''">',
+            '    <GlogLibBase>glogd</GlogLibBase>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(GlogLibBase)''==''''">',
+            '    <GlogLibBase>glog</GlogLibBase>',
             '  </PropertyGroup>',
             '  <ItemDefinitionGroup>',
             '    <ClCompile>',
@@ -189,7 +199,7 @@ jobs:
             '    </ClCompile>',
             '    <Link>',
             '      <AdditionalLibraryDirectories>$(GlogLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>',
-            '      <AdditionalDependencies>glog.lib;%(AdditionalDependencies)</AdditionalDependencies>',
+            '      <AdditionalDependencies>$(GlogLibBase)_$(GlogRuntimeDir).lib;%(AdditionalDependencies)</AdditionalDependencies>',
             '    </Link>',
             '  </ItemDefinitionGroup>',
             '</Project>'
@@ -205,7 +215,8 @@ jobs:
 
           Layout
           - include/glog
-          - lib/{Win32|x64}/{static|dll}/{mt|mtd|md|mdd}
+          - lib/{Win32|x64}/{static|dll}
+            (filenames include runtime suffix: *_mt, *_mtd, *_md, *_mdd)
           - glog.v143.props
 
           Using the props

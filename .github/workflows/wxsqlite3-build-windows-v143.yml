@@ -135,61 +135,96 @@ jobs:
           $text = $text.Replace($old, $new)
           Set-Content -LiteralPath $p -Value $text -Encoding utf8 -NoNewline
 
-      - name: Build wxSQLite3 (static + DLL, Win32 + x64, toolset v143)
-        shell: cmd
+      - name: Build wxSQLite3 (mt/mtd/md/mdd, static + DLL, Win32 + x64, toolset v143)
+        shell: pwsh
         run: |
-          if not defined VS_INST ( echo VS_INST not set: install step must export it via GITHUB_ENV & exit /b 1 )
-          if not defined WXWIN ( echo WXWIN not set: prebuilt wxWidgets extract step must export it & exit /b 1 )
-          if not exist "%VS_INST%\VC\Auxiliary\Build\vcvars32.bat" ( echo VS tools not found under "%VS_INST%" & exit /b 1 )
-          if not exist "%WXWIN%\include" ( echo WXWIN invalid: "%WXWIN%" & exit /b 1 )
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:VS_INST) { throw "VS_INST not set: install step must export it via GITHUB_ENV" }
+          if (-not $env:WXWIN) { throw "WXWIN not set: prebuilt wxWidgets extract step must export it" }
+          if (-not (Test-Path (Join-Path $env:VS_INST "VC\Auxiliary\Build\vcvars32.bat"))) { throw "VS tools not found under '$($env:VS_INST)'" }
+          if (-not (Test-Path (Join-Path $env:WXWIN "include"))) { throw "WXWIN invalid: '$($env:WXWIN)'" }
 
-          call "%VS_INST%\VC\Auxiliary\Build\vcvars32.bat"
-          msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143
-          if errorlevel 1 exit /b 1
-          msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release_DLL /p:Platform=Win32 /p:PlatformToolset=v143
-          if errorlevel 1 exit /b 1
+          $root = $env:GITHUB_WORKSPACE
+          $sln = Join-Path $root 'wxsqlite3\build\wxsqlite3_vc15.sln'
+          $runtimeMatrix = @(
+            @{ Name = "mt";  Value = "MultiThreaded" },
+            @{ Name = "mtd"; Value = "MultiThreadedDebug" },
+            @{ Name = "md";  Value = "MultiThreadedDLL" },
+            @{ Name = "mdd"; Value = "MultiThreadedDebugDLL" }
+          )
+          $archs = @(
+            @{ Name = "Win32"; VcVars = "vcvars32.bat"; StaticDir = "vc14x_lib";      DllDir = "vc14x_dll" },
+            @{ Name = "x64";   VcVars = "vcvars64.bat"; StaticDir = "vc14x_x64_lib"; DllDir = "vc14x_x64_dll" }
+          )
 
-          call "%VS_INST%\VC\Auxiliary\Build\vcvars64.bat"
-          msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143
-          if errorlevel 1 exit /b 1
-          msbuild wxsqlite3\build\wxsqlite3_vc15.sln /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=Release_DLL /p:Platform=x64 /p:PlatformToolset=v143
-          if errorlevel 1 exit /b 1
+          foreach ($a in $archs) {
+            foreach ($rt in $runtimeMatrix) {
+              foreach ($cfg in @("Release", "Release_DLL")) {
+                $cmd = @(
+                  "call `"$($env:VS_INST)\VC\Auxiliary\Build\$($a.VcVars)`"",
+                  "msbuild `"$sln`" /m /verbosity:minimal /t:wxsqlite3 /p:Configuration=$cfg /p:Platform=$($a.Name) /p:PlatformToolset=v143 /p:RuntimeLibrary=$($rt.Value)"
+                ) -join " && "
+                cmd /c $cmd
+                if ($LASTEXITCODE -ne 0) {
+                  throw "Build failed: arch=$($a.Name) runtime=$($rt.Name) config=$cfg"
+                }
+              }
 
-      - name: Assemble distribution (headers + libs + DLL + consumer props)
+              $stageBase = Join-Path $root ("stage/{0}/{1}" -f $a.Name, $rt.Name)
+              $stageStatic = Join-Path $stageBase 'static'
+              $stageDll = Join-Path $stageBase 'dll'
+              New-Item -ItemType Directory -Force -Path $stageStatic | Out-Null
+              New-Item -ItemType Directory -Force -Path $stageDll | Out-Null
+
+              $stLib = Join-Path $root ("wxsqlite3/lib/{0}/wxsqlite3.lib" -f $a.StaticDir)
+              if (-not (Test-Path $stLib)) { throw "Missing static lib after build: $stLib" }
+              Copy-Item $stLib (Join-Path $stageStatic 'wxsqlite3.lib') -Force
+
+              $dllOutDir = Join-Path $root ("wxsqlite3/lib/{0}" -f $a.DllDir)
+              foreach ($pat in @('wxsqlite3.dll', 'wxsqlite3.lib', 'wxsqlite3.pdb', 'wxsqlite3.exp')) {
+                $f = Join-Path $dllOutDir $pat
+                if (Test-Path $f) { Copy-Item $f $stageDll -Force }
+              }
+              if (-not (Test-Path (Join-Path $stageDll 'wxsqlite3.dll'))) { throw "Missing DLL after build: $dllOutDir" }
+              if (-not (Test-Path (Join-Path $stageDll 'wxsqlite3.lib'))) { throw "Missing import lib after build: $dllOutDir" }
+            }
+          }
+
+      - name: Assemble distribution (headers + libs + DLL with runtime suffix + consumer props)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $root = $env:GITHUB_WORKSPACE
           $dist = Join-Path $root 'dist/wxsqlite3-v143'
           New-Item -ItemType Directory -Force -Path (Join-Path $dist 'include/wx') | Out-Null
-          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'lib/Win32/static/Release') | Out-Null
-          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'lib/Win32/dll/Release') | Out-Null
-          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'lib/x64/static/Release') | Out-Null
-          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'lib/x64/dll/Release') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'lib/Win32/static') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'lib/Win32/dll') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'lib/x64/static') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'lib/x64/dll') | Out-Null
 
           Copy-Item (Join-Path $root 'wxsqlite3/include/wx/*.h') -Destination (Join-Path $dist 'include/wx') -Force
 
-          $s32 = Join-Path $root 'wxsqlite3/lib/vc14x_lib/wxsqlite3.lib'
-          $s64 = Join-Path $root 'wxsqlite3/lib/vc14x_x64_lib/wxsqlite3.lib'
-          if (-not (Test-Path $s32)) { throw "Missing static Win32 lib: $s32" }
-          if (-not (Test-Path $s64)) { throw "Missing static x64 lib: $s64" }
-          Copy-Item $s32 (Join-Path $dist 'lib/Win32/static/Release/wxsqlite3.lib') -Force
-          Copy-Item $s64 (Join-Path $dist 'lib/x64/static/Release/wxsqlite3.lib') -Force
+          $runtimes = @('mt', 'mtd', 'md', 'mdd')
+          foreach ($arch in @('Win32', 'x64')) {
+            foreach ($rt in $runtimes) {
+              $stgStatic = Join-Path $root ("stage/{0}/{1}/static/wxsqlite3.lib" -f $arch, $rt)
+              $stgDllDir = Join-Path $root ("stage/{0}/{1}/dll" -f $arch, $rt)
+              if (-not (Test-Path $stgStatic)) { throw "Missing staged static lib: $stgStatic" }
 
-          $d32 = Join-Path $root 'wxsqlite3/lib/vc14x_dll'
-          $d64 = Join-Path $root 'wxsqlite3/lib/vc14x_x64_dll'
-          foreach ($pair in @(
-            @{ Dir = $d32; Out = 'lib/Win32/dll/Release' },
-            @{ Dir = $d64; Out = 'lib/x64/dll/Release' }
-          )) {
-            $dir = $pair.Dir
-            $out = Join-Path $dist $pair.Out
-            foreach ($pat in @('wxsqlite3.dll', 'wxsqlite3.lib', 'wxsqlite3.pdb', 'wxsqlite3.exp')) {
-              $f = Join-Path $dir $pat
-              if (Test-Path $f) { Copy-Item $f $out -Force }
+              $outStatic = Join-Path $dist ("lib/{0}/static" -f $arch)
+              $outDll = Join-Path $dist ("lib/{0}/dll" -f $arch)
+              Copy-Item $stgStatic (Join-Path $outStatic ("wxsqlite3_{0}.lib" -f $rt)) -Force
+
+              foreach ($pat in @('wxsqlite3.dll', 'wxsqlite3.lib', 'wxsqlite3.pdb', 'wxsqlite3.exp')) {
+                $f = Join-Path $stgDllDir $pat
+                if (Test-Path $f) {
+                  $dst = "wxsqlite3_{0}.{1}" -f $rt, ($pat.Split('.')[-1])
+                  Copy-Item $f (Join-Path $outDll $dst) -Force
+                }
+              }
+              if (-not (Test-Path (Join-Path $outDll ("wxsqlite3_{0}.dll" -f $rt)))) { throw "Missing staged DLL for $arch/$rt" }
+              if (-not (Test-Path (Join-Path $outDll ("wxsqlite3_{0}.lib" -f $rt)))) { throw "Missing staged import lib for $arch/$rt" }
             }
-            if (-not (Test-Path (Join-Path $out 'wxsqlite3.dll'))) { throw "Missing DLL under $dir" }
-            if (-not (Test-Path (Join-Path $out 'wxsqlite3.lib'))) { throw "Missing import lib under $dir" }
           }
 
           # wxsqlite3.v143.props: single source is this workflow only; edit the YAML, not a duplicate file.
@@ -204,16 +239,31 @@ jobs:
             '  <PropertyGroup Condition="''$(Platform)''==''Win32''">',
             '    <WxSqlite3IncSubDir>mswu</WxSqlite3IncSubDir>',
             '    <WxSqlite3WxLibSubDir>vc14x_dll</WxSqlite3WxLibSubDir>',
-            '    <WxSqlite3StaticLibDir>$(WxSqlite3Root)lib\Win32\static\Release</WxSqlite3StaticLibDir>',
-            '    <WxSqlite3DllLibDir>$(WxSqlite3Root)lib\Win32\dll\Release</WxSqlite3DllLibDir>',
+            '    <WxSqlite3StaticLibDir>$(WxSqlite3Root)lib\Win32\static</WxSqlite3StaticLibDir>',
+            '    <WxSqlite3DllLibDir>$(WxSqlite3Root)lib\Win32\dll</WxSqlite3DllLibDir>',
             '    <WxSqlite3WxImportLibs>wxmsw32u_core.lib;wxbase32u.lib;wxtiff.lib;wxjpeg.lib;wxpng.lib;wxregexu.lib;wxexpat.lib;wxzlib.lib</WxSqlite3WxImportLibs>',
             '  </PropertyGroup>',
             '  <PropertyGroup Condition="''$(Platform)''==''x64''">',
             '    <WxSqlite3IncSubDir>mswu</WxSqlite3IncSubDir>',
             '    <WxSqlite3WxLibSubDir>vc14x_x64_dll</WxSqlite3WxLibSubDir>',
-            '    <WxSqlite3StaticLibDir>$(WxSqlite3Root)lib\x64\static\Release</WxSqlite3StaticLibDir>',
-            '    <WxSqlite3DllLibDir>$(WxSqlite3Root)lib\x64\dll\Release</WxSqlite3DllLibDir>',
+            '    <WxSqlite3StaticLibDir>$(WxSqlite3Root)lib\x64\static</WxSqlite3StaticLibDir>',
+            '    <WxSqlite3DllLibDir>$(WxSqlite3Root)lib\x64\dll</WxSqlite3DllLibDir>',
             '    <WxSqlite3WxImportLibs>wxmsw32u_core.lib;wxbase32u.lib;wxtiff.lib;wxjpeg.lib;wxpng.lib;wxregexu.lib;wxexpat.lib;wxzlib.lib</WxSqlite3WxImportLibs>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(WxSqlite3Runtime)''==''mt'' or ''$(RuntimeLibrary)''==''MultiThreaded''">',
+            '    <WxSqlite3RuntimeDir>mt</WxSqlite3RuntimeDir>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(WxSqlite3Runtime)''==''mtd'' or ''$(RuntimeLibrary)''==''MultiThreadedDebug''">',
+            '    <WxSqlite3RuntimeDir>mtd</WxSqlite3RuntimeDir>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(WxSqlite3Runtime)''==''md'' or ''$(RuntimeLibrary)''==''MultiThreadedDLL''">',
+            '    <WxSqlite3RuntimeDir>md</WxSqlite3RuntimeDir>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(WxSqlite3Runtime)''==''mdd'' or ''$(RuntimeLibrary)''==''MultiThreadedDebugDLL''">',
+            '    <WxSqlite3RuntimeDir>mdd</WxSqlite3RuntimeDir>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(WxSqlite3RuntimeDir)''==''''">',
+            '    <WxSqlite3RuntimeDir>md</WxSqlite3RuntimeDir>',
             '  </PropertyGroup>',
             '  <ItemDefinitionGroup>',
             '    <ClCompile>',
@@ -228,13 +278,13 @@ jobs:
             '    </ClCompile>',
             '    <Link>',
             '      <AdditionalLibraryDirectories>$(WxSqlite3DllLibDir);$(WXWIN)\lib\$(WxSqlite3WxLibSubDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>',
-            '      <AdditionalDependencies>wxsqlite3.lib;$(WxSqlite3WxImportLibs);%(AdditionalDependencies)</AdditionalDependencies>',
+            '      <AdditionalDependencies>wxsqlite3_$(WxSqlite3RuntimeDir).lib;$(WxSqlite3WxImportLibs);%(AdditionalDependencies)</AdditionalDependencies>',
             '    </Link>',
             '  </ItemDefinitionGroup>',
             '  <ItemDefinitionGroup Condition="''$(WxSqlite3UseDll)''!=''true''">',
             '    <Link>',
             '      <AdditionalLibraryDirectories>$(WxSqlite3StaticLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>',
-            '      <AdditionalDependencies>wxsqlite3.lib;%(AdditionalDependencies)</AdditionalDependencies>',
+            '      <AdditionalDependencies>wxsqlite3_$(WxSqlite3RuntimeDir).lib;%(AdditionalDependencies)</AdditionalDependencies>',
             '    </Link>',
             '  </ItemDefinitionGroup>',
             '</Project>'
@@ -248,8 +298,8 @@ jobs:
 
           Layout
           - include/wx                     Public headers
-          - lib/Win32|x64/static/Release   Static wxsqlite3.lib
-          - lib/Win32|x64/dll/Release      wxsqlite3.dll, import library wxsqlite3.lib (pdb/exp if present)
+          - lib/Win32|x64/static           Static wxsqlite3_<runtime>.lib
+          - lib/Win32|x64/dll              wxsqlite3_<runtime>.dll + wxsqlite3_<runtime>.lib (pdb/exp if present)
           - wxsqlite3.v143.props        MSBuild props for consumers (Import into vcxproj)
 
           Using the props (dynamic wx + dynamic wxSQLite3)
@@ -257,9 +307,9 @@ jobs:
           2. Set WXWIN to the wxWidgets root (user macro or environment variable).
           3. Add an Import in your vcxproj (adjust the path):
                <Import Project="...\\wxsqlite3.v143.props" />
-             Default WxSqlite3UseDll=true defines WXUSINGDLL and links wx import libs; runtime dir needs wxsqlite3.dll and wx vc14x DLLs.
+             Default WxSqlite3UseDll=true defines WXUSINGDLL and links wx import libs; runtime dir needs wxsqlite3_<runtime>.dll and wx vc14x DLLs.
 
-          WxSqlite3UseDll=false links only static wxsqlite3.lib; you must still configure wx static libs and link settings yourself.
+          WxSqlite3UseDll=false links static wxsqlite3_<runtime>.lib; you must still configure wx static libs and link settings yourself.
 
           Upstream: $repo ref $ref
           "@

@@ -1,12 +1,17 @@
-name: glog Windows v143
+# Build libcurl + curl.exe for Win32 and x64 with MSVC platform toolset v143.
+# Uses official curl sources + CMake (Visual Studio 17 2022 generator, -T v143).
+# TLS: Schannel (no OpenSSL). Runner: windows-latest.
+
+name: libcurl Windows v143
 
 on:
   repository_dispatch:
   workflow_dispatch:
 
 env:
-  GLOG_REPO: google/glog
-  GLOG_REF: v0.7.1
+  CURL_REPO: curl/curl
+  # Use a release tag for reproducible builds, e.g. curl-8_11_0
+  CURL_REF: curl-8_11_0
   UPLOAD_ARTIFACT: true
   UPLOAD_RELEASE: true
 
@@ -19,12 +24,12 @@ jobs:
       - name: Checkout build repo
         uses: actions/checkout@v4
 
-      - name: Checkout glog
+      - name: Checkout curl
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.GLOG_REPO }}
-          ref: ${{ env.GLOG_REF }}
-          path: glog
+          repository: ${{ env.CURL_REPO }}
+          ref: ${{ env.CURL_REF }}
+          path: curl
 
       - name: Install Visual Studio 2022 Build Tools (C++, MSVC v143)
         shell: pwsh
@@ -57,15 +62,25 @@ jobs:
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "VS_INST=$root"
           Write-Host "Build will use VS_INST=$root"
 
-      - name: Build glog (mt/mtd/md/mdd, static + dll, Win32 + x64, toolset v143)
+      - name: Build libcurl (mt/mtd/md/mdd, static + dll, Win32 + x64, toolset v143)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $root = $env:GITHUB_WORKSPACE
-          $src = Join-Path $root "glog"
+          $src = Join-Path $root "curl"
           $gen = "Visual Studio 17 2022"
           $toolset = "v143"
           if (-not $env:VS_INST) { throw "VS_INST not set" }
+
+          $common = @(
+            "-DCURL_USE_SCHANNEL=ON",
+            "-DCURL_ENABLE_SSL=ON",
+            "-DBUILD_TESTING=OFF",
+            "-DBUILD_EXAMPLES=OFF",
+            "-DENABLE_CURL_MANUAL=OFF",
+            "-DBUILD_LIBCURL_DOCS=OFF",
+            "-DBUILD_MISC_DOCS=OFF"
+          )
 
           $targets = @(
             @{ Runtime = "mt";  RuntimeValue = "MultiThreaded";          Config = "Release" },
@@ -89,16 +104,19 @@ jobs:
                 $bld = Join-Path $root ("build\" + $key)
                 $stg = Join-Path $root ("stage\" + $key)
 
-                cmake -S $src -B $bld -G $gen -A $a.CmakeArch -T $toolset `
-                  -DCMAKE_GENERATOR_INSTANCE="$env:VS_INST" `
-                  -DCMAKE_POLICY_DEFAULT_CMP0091=NEW `
-                  -DCMAKE_CXX_STANDARD=17 `
-                  -DCMAKE_CXX_STANDARD_REQUIRED=ON `
-                  "-DCMAKE_MSVC_RUNTIME_LIBRARY=$($t.RuntimeValue)" `
-                  "-DBUILD_SHARED_LIBS=$($k.Shared)" `
-                  -DBUILD_TESTING=OFF `
-                  -DWITH_GFLAGS=OFF `
-                  -DCMAKE_INSTALL_PREFIX=$stg
+                $args = @(
+                  "-S", $src,
+                  "-B", $bld,
+                  "-G", $gen,
+                  "-A", $a.CmakeArch,
+                  "-T", $toolset,
+                  "-DCMAKE_GENERATOR_INSTANCE=$env:VS_INST",
+                  "-DCMAKE_MSVC_RUNTIME_LIBRARY=$($t.RuntimeValue)",
+                  "-DBUILD_SHARED_LIBS=$($k.Shared)",
+                  "-DCMAKE_INSTALL_PREFIX=$stg"
+                ) + $common
+
+                & cmake @args
                 if ($LASTEXITCODE -ne 0) { throw "Configure failed for $key" }
 
                 cmake --build $bld --config $t.Config --parallel
@@ -115,8 +133,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $root = $env:GITHUB_WORKSPACE
-          $dist = Join-Path $root 'dist/glog-v143'
-          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'include/glog') | Out-Null
+          $dist = Join-Path $root 'dist/libcurl-v143'
+          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'include/curl') | Out-Null
 
           $archs = @("Win32", "x64")
           $kinds = @("static", "dll")
@@ -124,80 +142,138 @@ jobs:
 
           foreach ($a in $archs) {
             foreach ($k in $kinds) {
-              foreach ($rt in $runtimes) {
-                New-Item -ItemType Directory -Force -Path (Join-Path $dist ("lib/{0}/{1}/{2}" -f $a, $k, $rt)) | Out-Null
+              New-Item -ItemType Directory -Force -Path (Join-Path $dist ("lib/{0}/{1}" -f $a, $k)) | Out-Null
+            }
+          }
+
+          $hdr = Join-Path $root 'curl/include/curl'
+          if (-not (Test-Path $hdr)) { throw "Missing curl headers: $hdr" }
+          Copy-Item (Join-Path $hdr '*.h') -Destination (Join-Path $dist 'include/curl') -Force
+
+          function Copy-DllLayout {
+            param([string]$Arch, [string]$Runtime)
+            $aKey = $Arch.ToLowerInvariant()
+            $stg = Join-Path $root ("stage/{0}-dll-{1}" -f $aKey, $Runtime)
+            $out = Join-Path $dist ("lib/{0}/dll" -f $Arch)
+            $bin = Join-Path $stg 'bin'
+            $lib = Join-Path $stg 'lib'
+            if (-not (Test-Path $bin)) { throw "Missing install bin directory: $bin" }
+            if (-not (Test-Path $lib)) { throw "Missing install lib directory: $lib" }
+
+            $dll = Get-ChildItem -Path $bin -Filter 'libcurl*.dll' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            $exe = Get-ChildItem -Path $bin -Filter 'curl*.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not (Test-Path $dll)) { throw "Missing $dll" }
+            if (-not (Test-Path $exe)) { throw "Missing $exe" }
+            Copy-Item $dll.FullName (Join-Path $out ("{0}_{1}{2}" -f $dll.BaseName, $Runtime, $dll.Extension)) -Force
+            Copy-Item $exe.FullName (Join-Path $out ("{0}_{1}{2}" -f $exe.BaseName, $Runtime, $exe.Extension)) -Force
+
+            $imp = Get-ChildItem -Path $lib -Filter '*_imp.lib' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $imp) { throw "Missing import lib under $lib" }
+            Copy-Item $imp.FullName (Join-Path $out ("libcurl_{0}.lib" -f $Runtime)) -Force
+
+            foreach ($extra in @('*.pdb', '*.exp')) {
+              Get-ChildItem -Path $lib -Filter $extra -ErrorAction SilentlyContinue | ForEach-Object {
+                $dst = "{0}_{1}{2}" -f $_.BaseName, $Runtime, $_.Extension
+                Copy-Item $_.FullName (Join-Path $out $dst) -Force
+              }
+              Get-ChildItem -Path $bin -Filter $extra -ErrorAction SilentlyContinue | ForEach-Object {
+                $dst = "{0}_{1}{2}" -f $_.BaseName, $Runtime, $_.Extension
+                Copy-Item $_.FullName (Join-Path $out $dst) -Force
               }
             }
           }
 
-          Copy-Item (Join-Path $root 'glog/src/glog/*.h') -Destination (Join-Path $dist 'include/glog') -Force
+          function Copy-StaticLayout {
+            param([string]$Arch, [string]$Runtime)
+            $aKey = $Arch.ToLowerInvariant()
+            $stg = Join-Path $root ("stage/{0}-static-{1}" -f $aKey, $Runtime)
+            $out = Join-Path $dist ("lib/{0}/static" -f $Arch)
+            $lib = Join-Path $stg 'lib'
+            $bin = Join-Path $stg 'bin'
+            if (-not (Test-Path $lib)) { throw "Missing install lib directory: $lib" }
+
+            $st = Get-ChildItem -Path $lib -Filter 'libcurl*.lib' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*_imp.lib' } | Select-Object -First 1
+            if (-not $st) { throw "Missing static lib under $lib" }
+            Copy-Item $st.FullName (Join-Path $out ("libcurl_{0}.lib" -f $Runtime)) -Force
+            $exe = Get-ChildItem -Path $bin -Filter 'curl*.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($exe) {
+              Copy-Item $exe.FullName (Join-Path $out ("{0}_{1}{2}" -f $exe.BaseName, $Runtime, $exe.Extension)) -Force
+            }
+            Get-ChildItem -Path $lib -Filter '*.pdb' -ErrorAction SilentlyContinue | ForEach-Object {
+              $dst = "{0}_{1}{2}" -f $_.BaseName, $Runtime, $_.Extension
+              Copy-Item $_.FullName (Join-Path $out $dst) -Force
+            }
+          }
 
           foreach ($a in $archs) {
-            $aKey = $a.ToLowerInvariant()
-            foreach ($k in $kinds) {
-              foreach ($rt in $runtimes) {
-                $out = Join-Path $dist ("lib/{0}/{1}/{2}" -f $a, $k, $rt)
-                $stg = Join-Path $root ("stage/{0}-{1}-{2}" -f $aKey, $k, $rt)
-                $bin = Join-Path $stg "bin"
-                $lib = Join-Path $stg "lib"
-                if (-not (Test-Path $lib)) { throw "Missing install lib directory: $lib" }
-                Get-ChildItem -LiteralPath $lib -File | ForEach-Object { Copy-Item $_.FullName $out -Force }
-                if (Test-Path $bin) {
-                  Get-ChildItem -LiteralPath $bin -File | ForEach-Object { Copy-Item $_.FullName $out -Force }
-                }
-              }
+            foreach ($rt in $runtimes) {
+              Copy-DllLayout $a $rt
+              Copy-StaticLayout $a $rt
             }
           }
 
-          $propsDst = Join-Path $dist 'glog.v143.props'
+          $propsDst = Join-Path $dist 'libcurl.v143.props'
           @(
             '<?xml version="1.0" encoding="utf-8"?>',
             '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">',
             '  <PropertyGroup>',
-            '    <GlogRoot Condition="''$(GlogRoot)''==''''">$(MSBuildThisFileDirectory)</GlogRoot>',
-            '    <GlogUseDll Condition="''$(GlogUseDll)''==''''">true</GlogUseDll>',
+            '    <LibcurlRoot Condition="''$(LibcurlRoot)''==''''">$(MSBuildThisFileDirectory)</LibcurlRoot>',
+            '    <LibcurlUseDll Condition="''$(LibcurlUseDll)''==''''">true</LibcurlUseDll>',
             '  </PropertyGroup>',
             '  <PropertyGroup Condition="''$(Platform)''==''Win32''">',
-            '    <GlogPlatformDir>Win32</GlogPlatformDir>',
+            '    <LibcurlPlatformDir>Win32</LibcurlPlatformDir>',
             '  </PropertyGroup>',
             '  <PropertyGroup Condition="''$(Platform)''==''x64''">',
-            '    <GlogPlatformDir>x64</GlogPlatformDir>',
+            '    <LibcurlPlatformDir>x64</LibcurlPlatformDir>',
             '  </PropertyGroup>',
-            '  <PropertyGroup Condition="''$(GlogRuntime)''==''mt'' or ''$(RuntimeLibrary)''==''MultiThreaded''">',
-            '    <GlogRuntimeDir>mt</GlogRuntimeDir>',
+            '  <PropertyGroup Condition="''$(LibcurlRuntime)''==''mt'' or ''$(RuntimeLibrary)''==''MultiThreaded''">',
+            '    <LibcurlRuntimeDir>mt</LibcurlRuntimeDir>',
             '  </PropertyGroup>',
-            '  <PropertyGroup Condition="''$(GlogRuntime)''==''mtd'' or ''$(RuntimeLibrary)''==''MultiThreadedDebug''">',
-            '    <GlogRuntimeDir>mtd</GlogRuntimeDir>',
+            '  <PropertyGroup Condition="''$(LibcurlRuntime)''==''mtd'' or ''$(RuntimeLibrary)''==''MultiThreadedDebug''">',
+            '    <LibcurlRuntimeDir>mtd</LibcurlRuntimeDir>',
             '  </PropertyGroup>',
-            '  <PropertyGroup Condition="''$(GlogRuntime)''==''md'' or ''$(RuntimeLibrary)''==''MultiThreadedDLL''">',
-            '    <GlogRuntimeDir>md</GlogRuntimeDir>',
+            '  <PropertyGroup Condition="''$(LibcurlRuntime)''==''md'' or ''$(RuntimeLibrary)''==''MultiThreadedDLL''">',
+            '    <LibcurlRuntimeDir>md</LibcurlRuntimeDir>',
             '  </PropertyGroup>',
-            '  <PropertyGroup Condition="''$(GlogRuntime)''==''mdd'' or ''$(RuntimeLibrary)''==''MultiThreadedDebugDLL''">',
-            '    <GlogRuntimeDir>mdd</GlogRuntimeDir>',
+            '  <PropertyGroup Condition="''$(LibcurlRuntime)''==''mdd'' or ''$(RuntimeLibrary)''==''MultiThreadedDebugDLL''">',
+            '    <LibcurlRuntimeDir>mdd</LibcurlRuntimeDir>',
             '  </PropertyGroup>',
-            '  <PropertyGroup Condition="''$(GlogRuntimeDir)''==''''">',
-            '    <GlogRuntimeDir>md</GlogRuntimeDir>',
+            '  <PropertyGroup Condition="''$(LibcurlRuntimeDir)''==''''">',
+            '    <LibcurlRuntimeDir>md</LibcurlRuntimeDir>',
             '  </PropertyGroup>',
-            '  <PropertyGroup Condition="''$(GlogUseDll)''==''true''">',
-            '    <GlogLibDir>$(GlogRoot)lib\$(GlogPlatformDir)\dll\$(GlogRuntimeDir)</GlogLibDir>',
+            '  <PropertyGroup Condition="''$(LibcurlUseDll)''==''true''">',
+            '    <LibcurlLibDir>$(LibcurlRoot)lib\$(LibcurlPlatformDir)\dll</LibcurlLibDir>',
             '  </PropertyGroup>',
-            '  <PropertyGroup Condition="''$(GlogUseDll)''!=''true''">',
-            '    <GlogLibDir>$(GlogRoot)lib\$(GlogPlatformDir)\static\$(GlogRuntimeDir)</GlogLibDir>',
+            '  <PropertyGroup Condition="''$(LibcurlUseDll)''!=''true''">',
+            '    <LibcurlLibDir>$(LibcurlRoot)lib\$(LibcurlPlatformDir)\static</LibcurlLibDir>',
             '  </PropertyGroup>',
             '  <ItemDefinitionGroup>',
             '    <ClCompile>',
-            '      <AdditionalIncludeDirectories>$(GlogRoot)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>',
+            '      <AdditionalIncludeDirectories>$(LibcurlRoot)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>',
+            '    </ClCompile>',
+            '  </ItemDefinitionGroup>',
+            '  <ItemDefinitionGroup Condition="''$(LibcurlUseDll)''==''true''">',
+            '    <Link>',
+            '      <AdditionalLibraryDirectories>$(LibcurlLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>',
+            '      <AdditionalDependencies>libcurl_$(LibcurlRuntimeDir).lib;ws2_32.lib;wldap32.lib;advapi32.lib;crypt32.lib;bcrypt.lib;Normaliz.lib;%(AdditionalDependencies)</AdditionalDependencies>',
+            '    </Link>',
+            '  </ItemDefinitionGroup>',
+            '  <ItemDefinitionGroup Condition="''$(LibcurlUseDll)''!=''true''">',
+            '    <ClCompile>',
+            '      <PreprocessorDefinitions>%(PreprocessorDefinitions);CURL_STATICLIB</PreprocessorDefinitions>',
             '    </ClCompile>',
             '    <Link>',
-            '      <AdditionalLibraryDirectories>$(GlogLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>',
-            '      <AdditionalDependencies>glog.lib;%(AdditionalDependencies)</AdditionalDependencies>',
+            '      <AdditionalLibraryDirectories>$(LibcurlLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>',
+            '      <AdditionalDependencies>libcurl_$(LibcurlRuntimeDir).lib;ws2_32.lib;wldap32.lib;advapi32.lib;crypt32.lib;bcrypt.lib;Normaliz.lib;%(AdditionalDependencies)</AdditionalDependencies>',
             '    </Link>',
             '  </ItemDefinitionGroup>',
             '</Project>'
           ) | Set-Content -LiteralPath $propsDst -Encoding utf8
 
+          $ref = $env:CURL_REF
+          $repo = $env:CURL_REPO
           $readme = @"
-          glog prebuilt binaries (MSVC v143)
+          libcurl prebuilt (MSVC v143, Schannel TLS)
 
           Matrix
           - Platform: Win32 + x64
@@ -205,24 +281,27 @@ jobs:
           - Runtime: mt / mtd / md / mdd
 
           Layout
-          - include/glog
-          - lib/{Win32|x64}/{static|dll}/{mt|mtd|md|mdd}
-          - glog.v143.props
+          - include/curl
+          - lib/{Win32|x64}/{static|dll}
+            (filenames include runtime suffix: *_mt, *_mtd, *_md, *_mdd)
+          - libcurl.v143.props
 
           Using the props
-          - Import glog.v143.props in your vcxproj.
-          - GlogUseDll=true (default) links DLL import library.
-          - GlogUseDll=false links static library.
+          - Import libcurl.v143.props in your vcxproj.
+          - LibcurlUseDll=true (default) links DLL import library.
+          - LibcurlUseDll=false defines CURL_STATICLIB and links static library.
           - Runtime is auto-detected from RuntimeLibrary (MT/MTd/MD/MDd).
-          - Optional override: set GlogRuntime to mt/mtd/md/mdd.
+          - Optional override: set LibcurlRuntime to mt/mtd/md/mdd.
 
-          Upstream: $($env:GLOG_REPO) ref $($env:GLOG_REF)
+          Schannel is used for HTTPS; no OpenSSL runtime required.
+
+          Upstream: $repo ref $ref
           "@
           $readme.Trim() | Set-Content -LiteralPath (Join-Path $dist 'README.txt') -Encoding utf8
 
       - name: Generate GitHub Release metadata
         id: tag
-        if: success() && !cancelled()
+        if: (!cancelled())
         shell: pwsh
         env:
           UPLOAD_RELEASE: ${{ env.UPLOAD_RELEASE }}
@@ -235,14 +314,15 @@ jobs:
           }
           $ws = $env:GITHUB_WORKSPACE
           $fileDate = Get-Date -Format 'yyyy.MM.dd-HHmm'
-          $releaseTag = "glog-v143-$fileDate-$($env:GLOG_REF)"
+          $releaseTag = "libcurl-v143-$fileDate-$($env:CURL_REF)"
           $releaseName = $releaseTag
           $zipBase = "$releaseTag.zip"
-          $body = Join-Path $ws 'release-glog.txt'
+          $body = Join-Path $ws 'release-libcurl.txt'
           @(
-            "glog Windows v143 prebuilt",
+            "libcurl Windows v143 prebuilt",
             "",
-            "- glog: $($env:GLOG_REPO) (ref $($env:GLOG_REF))",
+            "- curl: $($env:CURL_REPO) (ref $($env:CURL_REF))",
+            "- TLS: Schannel (Windows native)",
             "- Platform: Win32 + x64, MSVC toolset v143",
             "- Runtime matrix: mt/mtd/md/mdd",
             "- Linkage matrix: static + dll",
@@ -255,11 +335,11 @@ jobs:
           Write-Host "Release tag=$releaseTag"
 
       - name: Zip distribution for GitHub Release
-        if: success() && steps.tag.outputs.status == 'success' && !cancelled()
+        if: steps.tag.outputs.status == 'success' && !cancelled()
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $src = Join-Path $env:GITHUB_WORKSPACE 'dist/glog-v143'
+          $src = Join-Path $env:GITHUB_WORKSPACE 'dist/libcurl-v143'
           $tag = '${{ steps.tag.outputs.release_tag }}'
           if (-not $tag) { throw "release_tag empty" }
           $zip = Join-Path $env:GITHUB_WORKSPACE "$tag.zip"
@@ -268,19 +348,19 @@ jobs:
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2.1.0
-        if: success() && steps.tag.outputs.status == 'success' && !cancelled()
+        if: steps.tag.outputs.status == 'success' && !cancelled()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           name: ${{ steps.tag.outputs.release_name }}
-          body_path: ${{ github.workspace }}/release-glog.txt
+          body_path: ${{ github.workspace }}/release-libcurl.txt
           files: ${{ github.workspace }}/${{ steps.tag.outputs.release_tag }}.zip
 
       - name: Upload distribution artifact
-        if: success() && env.UPLOAD_ARTIFACT == 'true' && !cancelled()
+        if: env.UPLOAD_ARTIFACT == 'true' && !cancelled()
         uses: actions/upload-artifact@v4
         with:
-          name: glog-v143-win32-x64-runtime-matrix
+          name: libcurl-v143-win32-x64-runtime-matrix
           path: |
-            dist/glog-v143/**
+            dist/libcurl-v143/**
