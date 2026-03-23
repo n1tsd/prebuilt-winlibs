@@ -1,0 +1,283 @@
+name: glog Windows v141_xp
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+
+env:
+  GLOG_REPO: google/glog
+  GLOG_REF: v0.7.1
+  UPLOAD_ARTIFACT: true
+  UPLOAD_RELEASE: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout build repo
+        uses: actions/checkout@v4
+
+      - name: Checkout glog
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GLOG_REPO }}
+          ref: ${{ env.GLOG_REF }}
+          path: glog
+
+      - name: Install Visual Studio 2022 Build Tools (C++, MSVC v141, WinXP toolset pack)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $bootstrapper = Join-Path $env:TEMP "vs_BuildTools.exe"
+          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vs_BuildTools.exe" -OutFile $bootstrapper -UseBasicParsing
+          Write-Host "Installing VS 2022 Build Tools (default path; first run can take 15-25 minutes)"
+          $args = @(
+            "--quiet", "--wait", "--norestart", "--nocache",
+            "--add", "Microsoft.VisualStudio.Workload.VCTools",
+            "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "--add", "Microsoft.VisualStudio.Component.VC.v141.x86.x64",
+            "--add", "Microsoft.VisualStudio.Component.WinXP"
+          )
+          $p = Start-Process -FilePath $bootstrapper -ArgumentList $args -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -notin 0, 3010) {
+            throw "vs_BuildTools.exe exited with $($p.ExitCode)"
+          }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $root = & $vswhere -latest -products Microsoft.VisualStudio.Product.BuildTools `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $root) {
+            throw "vswhere: no VS 2022 Build Tools with VC.Tools.x86.x64 (install may have failed or skipped C++)."
+          }
+          $vcvars32 = Join-Path $root "VC\Auxiliary\Build\vcvars32.bat"
+          if (-not (Test-Path $vcvars32)) {
+            throw "Missing VC toolchain: $vcvars32"
+          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VS_INST=$root"
+          Write-Host "Build will use VS_INST=$root"
+
+      - name: Build glog (mt/mtd/md/mdd, static + dll, Win32 + x64, toolset v141_xp)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:GITHUB_WORKSPACE
+          $src = Join-Path $root "glog"
+          $gen = "Visual Studio 17 2022"
+          $toolset = "v141_xp"
+
+          $targets = @(
+            @{ Runtime = "mt";  RuntimeValue = "MultiThreaded";          Config = "Release" },
+            @{ Runtime = "mtd"; RuntimeValue = "MultiThreadedDebug";     Config = "Debug"   },
+            @{ Runtime = "md";  RuntimeValue = "MultiThreadedDLL";       Config = "Release" },
+            @{ Runtime = "mdd"; RuntimeValue = "MultiThreadedDebugDLL";  Config = "Debug"   }
+          )
+          $archs = @(
+            @{ Name = "Win32"; CmakeArch = "Win32" },
+            @{ Name = "x64";   CmakeArch = "x64"   }
+          )
+          $kinds = @(
+            @{ Name = "static"; Shared = "OFF" },
+            @{ Name = "dll";    Shared = "ON"  }
+          )
+
+          foreach ($a in $archs) {
+            foreach ($k in $kinds) {
+              foreach ($t in $targets) {
+                $key = "{0}-{1}-{2}" -f $a.Name.ToLowerInvariant(), $k.Name, $t.Runtime
+                $bld = Join-Path $root ("build\" + $key)
+                $stg = Join-Path $root ("stage\" + $key)
+
+                cmake -S $src -B $bld -G $gen -A $a.CmakeArch -T $toolset `
+                  -DCMAKE_POLICY_DEFAULT_CMP0091=NEW `
+                  -DCMAKE_MSVC_RUNTIME_LIBRARY=$t.RuntimeValue `
+                  -DBUILD_SHARED_LIBS=$k.Shared `
+                  -DBUILD_TESTING=OFF `
+                  -DWITH_GFLAGS=OFF `
+                  -DCMAKE_INSTALL_PREFIX=$stg
+                if ($LASTEXITCODE -ne 0) { throw "Configure failed for $key" }
+
+                cmake --build $bld --config $t.Config --parallel
+                if ($LASTEXITCODE -ne 0) { throw "Build failed for $key" }
+
+                cmake --install $bld --config $t.Config
+                if ($LASTEXITCODE -ne 0) { throw "Install failed for $key" }
+              }
+            }
+          }
+
+      - name: Assemble distribution (headers + libs + dll per runtime + props)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:GITHUB_WORKSPACE
+          $dist = Join-Path $root 'dist/glog-v141_xp'
+          New-Item -ItemType Directory -Force -Path (Join-Path $dist 'include/glog') | Out-Null
+
+          $archs = @("Win32", "x64")
+          $kinds = @("static", "dll")
+          $runtimes = @("mt", "mtd", "md", "mdd")
+
+          foreach ($a in $archs) {
+            foreach ($k in $kinds) {
+              foreach ($rt in $runtimes) {
+                New-Item -ItemType Directory -Force -Path (Join-Path $dist ("lib/{0}/{1}/{2}" -f $a, $k, $rt)) | Out-Null
+              }
+            }
+          }
+
+          Copy-Item (Join-Path $root 'glog/src/glog/*.h') -Destination (Join-Path $dist 'include/glog') -Force
+
+          foreach ($a in $archs) {
+            $aKey = $a.ToLowerInvariant()
+            foreach ($k in $kinds) {
+              foreach ($rt in $runtimes) {
+                $out = Join-Path $dist ("lib/{0}/{1}/{2}" -f $a, $k, $rt)
+                $stg = Join-Path $root ("stage/{0}-{1}-{2}" -f $aKey, $k, $rt)
+                $bin = Join-Path $stg "bin"
+                $lib = Join-Path $stg "lib"
+                if (-not (Test-Path $lib)) { throw "Missing install lib directory: $lib" }
+                Get-ChildItem -LiteralPath $lib -File | ForEach-Object { Copy-Item $_.FullName $out -Force }
+                if (Test-Path $bin) {
+                  Get-ChildItem -LiteralPath $bin -File | ForEach-Object { Copy-Item $_.FullName $out -Force }
+                }
+              }
+            }
+          }
+
+          $propsDst = Join-Path $dist 'glog.v141_xp.props'
+          @(
+            '<?xml version="1.0" encoding="utf-8"?>',
+            '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">',
+            '  <PropertyGroup>',
+            '    <GlogRoot Condition="''$(GlogRoot)''==''''">$(MSBuildThisFileDirectory)</GlogRoot>',
+            '    <GlogUseDll Condition="''$(GlogUseDll)''==''''">true</GlogUseDll>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(Platform)''==''Win32''">',
+            '    <GlogPlatformDir>Win32</GlogPlatformDir>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(Platform)''==''x64''">',
+            '    <GlogPlatformDir>x64</GlogPlatformDir>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(GlogRuntime)''==''mt'' or ''$(RuntimeLibrary)''==''MultiThreaded''">',
+            '    <GlogRuntimeDir>mt</GlogRuntimeDir>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(GlogRuntime)''==''mtd'' or ''$(RuntimeLibrary)''==''MultiThreadedDebug''">',
+            '    <GlogRuntimeDir>mtd</GlogRuntimeDir>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(GlogRuntime)''==''md'' or ''$(RuntimeLibrary)''==''MultiThreadedDLL''">',
+            '    <GlogRuntimeDir>md</GlogRuntimeDir>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(GlogRuntime)''==''mdd'' or ''$(RuntimeLibrary)''==''MultiThreadedDebugDLL''">',
+            '    <GlogRuntimeDir>mdd</GlogRuntimeDir>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(GlogRuntimeDir)''==''''">',
+            '    <GlogRuntimeDir>md</GlogRuntimeDir>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(GlogUseDll)''==''true''">',
+            '    <GlogLibDir>$(GlogRoot)lib\$(GlogPlatformDir)\dll\$(GlogRuntimeDir)</GlogLibDir>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(GlogUseDll)''!=''true''">',
+            '    <GlogLibDir>$(GlogRoot)lib\$(GlogPlatformDir)\static\$(GlogRuntimeDir)</GlogLibDir>',
+            '  </PropertyGroup>',
+            '  <ItemDefinitionGroup>',
+            '    <ClCompile>',
+            '      <AdditionalIncludeDirectories>$(GlogRoot)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>',
+            '    </ClCompile>',
+            '    <Link>',
+            '      <AdditionalLibraryDirectories>$(GlogLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>',
+            '      <AdditionalDependencies>glog.lib;%(AdditionalDependencies)</AdditionalDependencies>',
+            '    </Link>',
+            '  </ItemDefinitionGroup>',
+            '</Project>'
+          ) | Set-Content -LiteralPath $propsDst -Encoding utf8
+
+          $readme = @"
+          glog prebuilt binaries (MSVC v141_xp)
+
+          Matrix
+          - Platform: Win32 + x64
+          - Linkage: static + dll
+          - Runtime: mt / mtd / md / mdd
+
+          Layout
+          - include/glog
+          - lib/{Win32|x64}/{static|dll}/{mt|mtd|md|mdd}
+          - glog.v141_xp.props
+
+          Using the props
+          - Import glog.v141_xp.props in your vcxproj.
+          - GlogUseDll=true (default) links DLL import library.
+          - GlogUseDll=false links static library.
+          - Runtime is auto-detected from RuntimeLibrary (MT/MTd/MD/MDd).
+          - Optional override: set GlogRuntime to mt/mtd/md/mdd.
+
+          Upstream: $($env:GLOG_REPO) ref $($env:GLOG_REF)
+          "@
+          $readme.Trim() | Set-Content -LiteralPath (Join-Path $dist 'README.txt') -Encoding utf8
+
+      - name: Generate GitHub Release metadata
+        id: tag
+        if: (!cancelled())
+        shell: pwsh
+        env:
+          UPLOAD_RELEASE: ${{ env.UPLOAD_RELEASE }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:UPLOAD_RELEASE -ne 'true') {
+            "status=skip" >> $env:GITHUB_OUTPUT
+            Write-Host "UPLOAD_RELEASE is not true; skip GitHub Release."
+            exit 0
+          }
+          $ws = $env:GITHUB_WORKSPACE
+          $fileDate = Get-Date -Format 'yyyy.MM.dd-HHmm'
+          $releaseTag = "glog-v141_xp-$fileDate-$($env:GLOG_REF)"
+          $releaseName = $releaseTag
+          $zipBase = "$releaseTag.zip"
+          $body = Join-Path $ws 'release-glog.txt'
+          @(
+            "glog Windows v141_xp prebuilt",
+            "",
+            "- glog: $($env:GLOG_REPO) (ref $($env:GLOG_REF))",
+            "- Platform: Win32 + x64, MSVC toolset v141_xp",
+            "- Runtime matrix: mt/mtd/md/mdd",
+            "- Linkage matrix: static + dll",
+            "",
+            "Asset: $zipBase (dist layout + README + props)"
+          ) | Set-Content -LiteralPath $body -Encoding utf8
+          "release_tag=$releaseTag" >> $env:GITHUB_OUTPUT
+          "release_name=$releaseName" >> $env:GITHUB_OUTPUT
+          "status=success" >> $env:GITHUB_OUTPUT
+          Write-Host "Release tag=$releaseTag"
+
+      - name: Zip distribution for GitHub Release
+        if: steps.tag.outputs.status == 'success' && !cancelled()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:GITHUB_WORKSPACE 'dist/glog-v141_xp'
+          $tag = '${{ steps.tag.outputs.release_tag }}'
+          if (-not $tag) { throw "release_tag empty" }
+          $zip = Join-Path $env:GITHUB_WORKSPACE "$tag.zip"
+          if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force }
+          Compress-Archive -Path (Join-Path $src '*') -DestinationPath $zip -CompressionLevel Optimal
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2.1.0
+        if: steps.tag.outputs.status == 'success' && !cancelled()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: ${{ steps.tag.outputs.release_name }}
+          body_path: ${{ github.workspace }}/release-glog.txt
+          files: ${{ github.workspace }}/${{ steps.tag.outputs.release_tag }}.zip
+
+      - name: Upload distribution artifact
+        if: env.UPLOAD_ARTIFACT == 'true' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: glog-v141_xp-win32-x64-runtime-matrix
+          path: |
+            dist/glog-v141_xp/**
