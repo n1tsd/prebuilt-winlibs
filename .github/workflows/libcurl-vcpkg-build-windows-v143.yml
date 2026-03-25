@@ -91,12 +91,13 @@ jobs:
           ) | Set-Content -LiteralPath (Join-Path $od "x64-windows-v143.cmake") -Encoding ascii
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "VCPKG_OVERLAY_TRIPLETS=$od"
 
+      # Do not set VCPKG_VISUAL_STUDIO_PATH to BuildTools: vcpkg host deps use triplet
+      # x64-windows and rejects that path on GHA while VS 2022 Enterprise is valid.
+      # Overlay triplets still force VCPKG_PLATFORM_TOOLSET=v143 for target packages.
       - name: vcpkg install curl (Win32 + x64, Schannel via default ssl on Windows)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          if (-not $env:VS_INST) { throw "VS_INST not set" }
-          $env:VCPKG_VISUAL_STUDIO_PATH = $env:VS_INST
           $root = $env:GITHUB_WORKSPACE
           $vp = Join-Path $root "vcpkg\vcpkg.exe"
           $overlay = $env:VCPKG_OVERLAY_TRIPLETS
@@ -171,7 +172,7 @@ jobs:
 
       - name: Generate GitHub Release metadata
         id: tag
-        if: (!cancelled())
+        if: success() && !cancelled()
         shell: pwsh
         env:
           UPLOAD_RELEASE: ${{ env.UPLOAD_RELEASE }}
@@ -203,7 +204,7 @@ jobs:
           Write-Host "Release tag=$releaseTag"
 
       - name: Zip distribution for GitHub Release
-        if: steps.tag.outputs.status == 'success' && !cancelled()
+        if: success() && steps.tag.outputs.status == 'success' && !cancelled()
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -216,7 +217,7 @@ jobs:
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2.1.0
-        if: steps.tag.outputs.status == 'success' && !cancelled()
+        if: success() && steps.tag.outputs.status == 'success' && !cancelled()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -226,7 +227,7 @@ jobs:
           files: ${{ github.workspace }}/${{ steps.tag.outputs.release_tag }}.zip
 
       - name: Upload distribution artifact
-        if: env.UPLOAD_ARTIFACT == 'true' && !cancelled()
+        if: success() && env.UPLOAD_ARTIFACT == 'true' && !cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: libcurl-vcpkg-v143-dist
