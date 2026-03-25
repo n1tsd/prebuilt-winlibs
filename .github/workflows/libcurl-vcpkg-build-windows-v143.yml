@@ -1,0 +1,234 @@
+# Build libcurl (+ curl.exe) via vcpkg for Win32 and x64 with MSVC toolset v143.
+# Same VS 2022 Build Tools install as other workflows; triplets use VCPKG_PLATFORM_TOOLSET=v143.
+
+name: libcurl vcpkg Windows v143
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+
+env:
+  # Pin vcpkg for reproducible builds (https://github.com/microsoft/vcpkg/releases)
+  VCPKG_REF: 2025.01.13
+  UPLOAD_ARTIFACT: true
+  UPLOAD_RELEASE: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout build repo
+        uses: actions/checkout@v4
+
+      - name: Install Visual Studio 2022 Build Tools (C++, MSVC v143)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $bootstrapper = Join-Path $env:TEMP "vs_BuildTools.exe"
+          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vs_BuildTools.exe" -OutFile $bootstrapper -UseBasicParsing
+          Write-Host "Installing VS 2022 Build Tools (default path; first run can take 15-25 minutes)"
+          $args = @(
+            "--quiet", "--wait", "--norestart", "--nocache",
+            "--add", "Microsoft.VisualStudio.Workload.VCTools",
+            "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "--add", "Microsoft.VisualStudio.Component.VC.v143.x86.x64"
+          )
+          $p = Start-Process -FilePath $bootstrapper -ArgumentList $args -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -notin 0, 3010) {
+            throw "vs_BuildTools.exe exited with $($p.ExitCode)"
+          }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $root = & $vswhere -latest -products Microsoft.VisualStudio.Product.BuildTools `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $root) {
+            throw "vswhere: no VS 2022 Build Tools with VC.Tools.x86.x64 (install may have failed or skipped C++)."
+          }
+          $vcvars32 = Join-Path $root "VC\Auxiliary\Build\vcvars32.bat"
+          if (-not (Test-Path $vcvars32)) {
+            throw "Missing VC toolchain: $vcvars32"
+          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VS_INST=$root"
+          Write-Host "Build will use VS_INST=$root"
+
+      - name: Clone vcpkg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:GITHUB_WORKSPACE
+          $vp = Join-Path $root "vcpkg"
+          if (Test-Path $vp) { Remove-Item -LiteralPath $vp -Recurse -Force }
+          git clone --depth 1 --branch $env:VCPKG_REF https://github.com/microsoft/vcpkg.git $vp
+          if ($LASTEXITCODE -ne 0) {
+            throw "git clone vcpkg failed (VCPKG_REF=$($env:VCPKG_REF) must be a branch or tag reachable with --depth 1)"
+          }
+
+      - name: Bootstrap vcpkg
+        shell: cmd
+        run: |
+          cd /d "%GITHUB_WORKSPACE%\vcpkg"
+          call bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Overlay triplets (v143)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $od = Join-Path $env:GITHUB_WORKSPACE "vcpkg-overlay-triplets"
+          New-Item -ItemType Directory -Force -Path $od | Out-Null
+          @(
+            'set(VCPKG_TARGET_ARCHITECTURE x86)',
+            'set(VCPKG_CRT_LINKAGE dynamic)',
+            'set(VCPKG_LIBRARY_LINKAGE dynamic)',
+            'set(VCPKG_PLATFORM_TOOLSET v143)'
+          ) | Set-Content -LiteralPath (Join-Path $od "x86-windows-v143.cmake") -Encoding ascii
+          @(
+            'set(VCPKG_TARGET_ARCHITECTURE x64)',
+            'set(VCPKG_CRT_LINKAGE dynamic)',
+            'set(VCPKG_LIBRARY_LINKAGE dynamic)',
+            'set(VCPKG_PLATFORM_TOOLSET v143)'
+          ) | Set-Content -LiteralPath (Join-Path $od "x64-windows-v143.cmake") -Encoding ascii
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VCPKG_OVERLAY_TRIPLETS=$od"
+
+      - name: vcpkg install curl (Win32 + x64, Schannel via default ssl on Windows)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:VS_INST) { throw "VS_INST not set" }
+          $env:VCPKG_VISUAL_STUDIO_PATH = $env:VS_INST
+          $root = $env:GITHUB_WORKSPACE
+          $vp = Join-Path $root "vcpkg\vcpkg.exe"
+          $overlay = $env:VCPKG_OVERLAY_TRIPLETS
+          & $vp install `
+            'curl[tool]:x86-windows-v143' `
+            'curl[tool]:x64-windows-v143' `
+            --overlay-triplets=$overlay `
+            --clean-after-build
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
+
+      - name: Assemble distribution (per-triplet tree + props)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:GITHUB_WORKSPACE
+          $vpRoot = Join-Path $root "vcpkg"
+          $installed = Join-Path $vpRoot "installed"
+          $dist = Join-Path $root "dist/libcurl-vcpkg-v143"
+          foreach ($t in @("x86-windows-v143", "x64-windows-v143")) {
+            $src = Join-Path $installed $t
+            if (-not (Test-Path $src)) { throw "Missing vcpkg installed tree: $src" }
+            $dst = Join-Path $dist $t
+            foreach ($sub in @("include", "lib", "bin", "share")) {
+              $sp = Join-Path $src $sub
+              if (Test-Path $sp) {
+                Copy-Item -LiteralPath $sp -Destination $dst -Recurse -Force
+              }
+            }
+          }
+
+          $propsDst = Join-Path $dist "libcurl.vcpkg.v143.props"
+          @(
+            '<?xml version="1.0" encoding="utf-8"?>',
+            '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">',
+            '  <PropertyGroup>',
+            '    <LibcurlVcpkgRoot Condition="''$(LibcurlVcpkgRoot)''==''''">$(MSBuildThisFileDirectory)</LibcurlVcpkgRoot>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(Platform)''==''Win32''">',
+            '    <LibcurlVcpkgTriplet>x86-windows-v143</LibcurlVcpkgTriplet>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(Platform)''==''x64''">',
+            '    <LibcurlVcpkgTriplet>x64-windows-v143</LibcurlVcpkgTriplet>',
+            '  </PropertyGroup>',
+            '  <ItemDefinitionGroup>',
+            '    <ClCompile>',
+            '      <AdditionalIncludeDirectories>$(LibcurlVcpkgRoot)$(LibcurlVcpkgTriplet)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>',
+            '    </ClCompile>',
+            '    <Link>',
+            '      <AdditionalLibraryDirectories>$(LibcurlVcpkgRoot)$(LibcurlVcpkgTriplet)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>',
+            '      <AdditionalDependencies>libcurl.lib;%(AdditionalDependencies)</AdditionalDependencies>',
+            '    </Link>',
+            '  </ItemDefinitionGroup>',
+            '</Project>'
+          ) | Set-Content -LiteralPath $propsDst -Encoding utf8
+
+          $ref = $env:VCPKG_REF
+          $readme = @"
+          libcurl built with vcpkg (overlay triplets, MSVC toolset v143)
+
+          Layout (vcpkg installed layout per triplet)
+          - x86-windows-v143/   Win32 (include, lib, bin, share)
+          - x64-windows-v143/   x64
+          - libcurl.vcpkg.v143.props   Optional MSBuild import (sets include/lib; links libcurl.lib)
+
+          TLS: On Windows, vcpkg curl default ssl feature uses Schannel (no OpenSSL DLLs).
+
+          Runtime: copy DLLs from the matching triplet bin\ next to your app (e.g. libcurl.dll, zlib1.dll, etc.).
+
+          vcpkg ref: $ref (set env VCPKG_REF in workflow to pin tag or commit)
+          "@
+          $readme.Trim() | Set-Content -LiteralPath (Join-Path $dist "README.txt") -Encoding utf8
+
+      - name: Generate GitHub Release metadata
+        id: tag
+        if: (!cancelled())
+        shell: pwsh
+        env:
+          UPLOAD_RELEASE: ${{ env.UPLOAD_RELEASE }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:UPLOAD_RELEASE -ne 'true') {
+            "status=skip" >> $env:GITHUB_OUTPUT
+            Write-Host "UPLOAD_RELEASE is not true; skip GitHub Release."
+            exit 0
+          }
+          $ws = $env:GITHUB_WORKSPACE
+          $fileDate = Get-Date -Format 'yyyy.MM.dd-HHmm'
+          $releaseTag = "libcurl-vcpkg-v143-$fileDate-vcpkg$($env:VCPKG_REF -replace '[^a-zA-Z0-9._-]', '_')"
+          $releaseName = $releaseTag
+          $zipBase = "$releaseTag.zip"
+          $body = Join-Path $ws 'release-libcurl-vcpkg.txt'
+          @(
+            "libcurl vcpkg Windows v143 prebuilt",
+            "",
+            "- Built with vcpkg (microsoft/vcpkg ref $($env:VCPKG_REF))",
+            "- Triplets: x86-windows-v143, x64-windows-v143 (VCPKG_PLATFORM_TOOLSET=v143)",
+            "- Package: curl[tool] (libcurl + curl.exe)",
+            "",
+            "Asset: $zipBase"
+          ) | Set-Content -LiteralPath $body -Encoding utf8
+          "release_tag=$releaseTag" >> $env:GITHUB_OUTPUT
+          "release_name=$releaseName" >> $env:GITHUB_OUTPUT
+          "status=success" >> $env:GITHUB_OUTPUT
+          Write-Host "Release tag=$releaseTag"
+
+      - name: Zip distribution for GitHub Release
+        if: steps.tag.outputs.status == 'success' && !cancelled()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:GITHUB_WORKSPACE 'dist/libcurl-vcpkg-v143'
+          $tag = '${{ steps.tag.outputs.release_tag }}'
+          if (-not $tag) { throw "release_tag empty" }
+          $zip = Join-Path $env:GITHUB_WORKSPACE "$tag.zip"
+          if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force }
+          Compress-Archive -Path (Join-Path $src '*') -DestinationPath $zip -CompressionLevel Optimal
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2.1.0
+        if: steps.tag.outputs.status == 'success' && !cancelled()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: ${{ steps.tag.outputs.release_name }}
+          body_path: ${{ github.workspace }}/release-libcurl-vcpkg.txt
+          files: ${{ github.workspace }}/${{ steps.tag.outputs.release_tag }}.zip
+
+      - name: Upload distribution artifact
+        if: env.UPLOAD_ARTIFACT == 'true' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libcurl-vcpkg-v143-dist
+          path: |
+            dist/libcurl-vcpkg-v143/**
