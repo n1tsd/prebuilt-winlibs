@@ -77,18 +77,59 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $od = Join-Path $env:GITHUB_WORKSPACE "vcpkg-overlay-triplets"
           New-Item -ItemType Directory -Force -Path $od | Out-Null
+          # Triplets requested by the build matrix:
+          # - static/dll (VCPKG_LIBRARY_LINKAGE)
+          # - mt/md     (VCPKG_CRT_LINKAGE)
+          # - x86/x64   (VCPKG_TARGET_ARCHITECTURE)
+          @(
+            'set(VCPKG_TARGET_ARCHITECTURE x86)',
+            'set(VCPKG_CRT_LINKAGE static)',
+            'set(VCPKG_LIBRARY_LINKAGE static)',
+            'set(VCPKG_PLATFORM_TOOLSET v143)'
+          ) | Set-Content -LiteralPath (Join-Path $od "x86-windows-static-mt.cmake") -Encoding ascii
+          @(
+            'set(VCPKG_TARGET_ARCHITECTURE x86)',
+            'set(VCPKG_CRT_LINKAGE dynamic)',
+            'set(VCPKG_LIBRARY_LINKAGE static)',
+            'set(VCPKG_PLATFORM_TOOLSET v143)'
+          ) | Set-Content -LiteralPath (Join-Path $od "x86-windows-static-md.cmake") -Encoding ascii
+          @(
+            'set(VCPKG_TARGET_ARCHITECTURE x86)',
+            'set(VCPKG_CRT_LINKAGE static)',
+            'set(VCPKG_LIBRARY_LINKAGE dynamic)',
+            'set(VCPKG_PLATFORM_TOOLSET v143)'
+          ) | Set-Content -LiteralPath (Join-Path $od "x86-windows-dll-mt.cmake") -Encoding ascii
           @(
             'set(VCPKG_TARGET_ARCHITECTURE x86)',
             'set(VCPKG_CRT_LINKAGE dynamic)',
             'set(VCPKG_LIBRARY_LINKAGE dynamic)',
             'set(VCPKG_PLATFORM_TOOLSET v143)'
-          ) | Set-Content -LiteralPath (Join-Path $od "x86-windows-v143.cmake") -Encoding ascii
+          ) | Set-Content -LiteralPath (Join-Path $od "x86-windows-dll-md.cmake") -Encoding ascii
+
+          @(
+            'set(VCPKG_TARGET_ARCHITECTURE x64)',
+            'set(VCPKG_CRT_LINKAGE static)',
+            'set(VCPKG_LIBRARY_LINKAGE static)',
+            'set(VCPKG_PLATFORM_TOOLSET v143)'
+          ) | Set-Content -LiteralPath (Join-Path $od "x64-windows-static-mt.cmake") -Encoding ascii
+          @(
+            'set(VCPKG_TARGET_ARCHITECTURE x64)',
+            'set(VCPKG_CRT_LINKAGE dynamic)',
+            'set(VCPKG_LIBRARY_LINKAGE static)',
+            'set(VCPKG_PLATFORM_TOOLSET v143)'
+          ) | Set-Content -LiteralPath (Join-Path $od "x64-windows-static-md.cmake") -Encoding ascii
+          @(
+            'set(VCPKG_TARGET_ARCHITECTURE x64)',
+            'set(VCPKG_CRT_LINKAGE static)',
+            'set(VCPKG_LIBRARY_LINKAGE dynamic)',
+            'set(VCPKG_PLATFORM_TOOLSET v143)'
+          ) | Set-Content -LiteralPath (Join-Path $od "x64-windows-dll-mt.cmake") -Encoding ascii
           @(
             'set(VCPKG_TARGET_ARCHITECTURE x64)',
             'set(VCPKG_CRT_LINKAGE dynamic)',
             'set(VCPKG_LIBRARY_LINKAGE dynamic)',
             'set(VCPKG_PLATFORM_TOOLSET v143)'
-          ) | Set-Content -LiteralPath (Join-Path $od "x64-windows-v143.cmake") -Encoding ascii
+          ) | Set-Content -LiteralPath (Join-Path $od "x64-windows-dll-md.cmake") -Encoding ascii
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "VCPKG_OVERLAY_TRIPLETS=$od"
 
       # Do not set VCPKG_VISUAL_STUDIO_PATH to BuildTools: vcpkg host deps use triplet
@@ -102,8 +143,14 @@ jobs:
           $vp = Join-Path $root "vcpkg\vcpkg.exe"
           $overlay = $env:VCPKG_OVERLAY_TRIPLETS
           & $vp install `
-            'curl[tool]:x86-windows-v143' `
-            'curl[tool]:x64-windows-v143' `
+            'curl[tool]:x86-windows-static-mt' `
+            'curl[tool]:x86-windows-static-md' `
+            'curl[tool]:x86-windows-dll-mt' `
+            'curl[tool]:x86-windows-dll-md' `
+            'curl[tool]:x64-windows-static-mt' `
+            'curl[tool]:x64-windows-static-md' `
+            'curl[tool]:x64-windows-dll-mt' `
+            'curl[tool]:x64-windows-dll-md' `
             --overlay-triplets=$overlay `
             --clean-after-build
           if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
@@ -116,7 +163,16 @@ jobs:
           $vpRoot = Join-Path $root "vcpkg"
           $installed = Join-Path $vpRoot "installed"
           $dist = Join-Path $root "dist/libcurl-vcpkg-v143"
-          foreach ($t in @("x86-windows-v143", "x64-windows-v143")) {
+          foreach ($t in @(
+            "x86-windows-static-mt",
+            "x86-windows-static-md",
+            "x86-windows-dll-mt",
+            "x86-windows-dll-md",
+            "x64-windows-static-mt",
+            "x64-windows-static-md",
+            "x64-windows-dll-mt",
+            "x64-windows-dll-md"
+          )) {
             $src = Join-Path $installed $t
             if (-not (Test-Path $src)) { throw "Missing vcpkg installed tree: $src" }
             $dst = Join-Path $dist $t
@@ -134,12 +190,28 @@ jobs:
             '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">',
             '  <PropertyGroup>',
             '    <LibcurlVcpkgRoot Condition="''$(LibcurlVcpkgRoot)''==''''">$(MSBuildThisFileDirectory)</LibcurlVcpkgRoot>',
+            '    <LibcurlUseDll Condition="''$(LibcurlUseDll)''==''''">true</LibcurlUseDll>',
             '  </PropertyGroup>',
             '  <PropertyGroup Condition="''$(Platform)''==''Win32''">',
-            '    <LibcurlVcpkgTriplet>x86-windows-v143</LibcurlVcpkgTriplet>',
+            '    <LibcurlVcpkgArch>x86</LibcurlVcpkgArch>',
             '  </PropertyGroup>',
             '  <PropertyGroup Condition="''$(Platform)''==''x64''">',
-            '    <LibcurlVcpkgTriplet>x64-windows-v143</LibcurlVcpkgTriplet>',
+            '    <LibcurlVcpkgArch>x64</LibcurlVcpkgArch>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(RuntimeLibrary)''==''MultiThreaded'' or ''$(RuntimeLibrary)''==''MultiThreadedDebug''">',
+            '    <LibcurlVcpkgCrt>mt</LibcurlVcpkgCrt>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(RuntimeLibrary)''==''MultiThreadedDLL'' or ''$(RuntimeLibrary)''==''MultiThreadedDebugDLL''">',
+            '    <LibcurlVcpkgCrt>md</LibcurlVcpkgCrt>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(LibcurlUseDll)''==''true''">',
+            '    <LibcurlVcpkgLinkage>dll</LibcurlVcpkgLinkage>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(LibcurlUseDll)''!=''true''">',
+            '    <LibcurlVcpkgLinkage>static</LibcurlVcpkgLinkage>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup>',
+            '    <LibcurlVcpkgTriplet>$(LibcurlVcpkgArch)-windows-$(LibcurlVcpkgLinkage)-$(LibcurlVcpkgCrt)</LibcurlVcpkgTriplet>',
             '  </PropertyGroup>',
             '  <ItemDefinitionGroup>',
             '    <ClCompile>',
@@ -147,8 +219,22 @@ jobs:
             '    </ClCompile>',
             '    <Link>',
             '      <AdditionalLibraryDirectories>$(LibcurlVcpkgRoot)$(LibcurlVcpkgTriplet)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>',
-            '      <AdditionalDependencies>libcurl.lib;%(AdditionalDependencies)</AdditionalDependencies>',
             '    </Link>',
+            '  </ItemDefinitionGroup>',
+            '  <ItemDefinitionGroup Condition="''$(Configuration)''==''Debug''">',
+            '    <Link>',
+            '      <AdditionalDependencies>libcurld.lib;ws2_32.lib;wldap32.lib;advapi32.lib;crypt32.lib;bcrypt.lib;Normaliz.lib;%(AdditionalDependencies)</AdditionalDependencies>',
+            '    </Link>',
+            '  </ItemDefinitionGroup>',
+            '  <ItemDefinitionGroup Condition="''$(Configuration)''!=''Debug''">',
+            '    <Link>',
+            '      <AdditionalDependencies>libcurl.lib;ws2_32.lib;wldap32.lib;advapi32.lib;crypt32.lib;bcrypt.lib;Normaliz.lib;%(AdditionalDependencies)</AdditionalDependencies>',
+            '    </Link>',
+            '  </ItemDefinitionGroup>',
+            '  <ItemDefinitionGroup Condition="''$(LibcurlUseDll)''!=''true''">',
+            '    <ClCompile>',
+            '      <PreprocessorDefinitions>%(PreprocessorDefinitions);CURL_STATICLIB</PreprocessorDefinitions>',
+            '    </ClCompile>',
             '  </ItemDefinitionGroup>',
             '</Project>'
           ) | Set-Content -LiteralPath $propsDst -Encoding utf8
@@ -158,8 +244,14 @@ jobs:
           libcurl built with vcpkg (overlay triplets, MSVC toolset v143)
 
           Layout (vcpkg installed layout per triplet)
-          - x86-windows-v143/   Win32 (include, lib, bin, share)
-          - x64-windows-v143/   x64
+          - x86-windows-static-mt/  Win32 (MT + static lib)
+          - x86-windows-static-md/  Win32 (MD + static lib)
+          - x86-windows-dll-mt/     Win32 (MT + dll)
+          - x86-windows-dll-md/     Win32 (MD + dll)
+          - x64-windows-static-mt/  x64 (MT + static lib)
+          - x64-windows-static-md/  x64 (MD + static lib)
+          - x64-windows-dll-mt/     x64 (MT + dll)
+          - x64-windows-dll-md/     x64 (MD + dll)
           - libcurl.vcpkg.v143.props   Optional MSBuild import (sets include/lib; links libcurl.lib)
 
           TLS: On Windows, vcpkg curl default ssl feature uses Schannel (no OpenSSL DLLs).
@@ -193,7 +285,7 @@ jobs:
             "libcurl vcpkg Windows v143 prebuilt",
             "",
             "- Built with vcpkg (microsoft/vcpkg ref $($env:VCPKG_REF))",
-            "- Triplets: x86-windows-v143, x64-windows-v143 (VCPKG_PLATFORM_TOOLSET=v143)",
+            "- Triplets: x86-windows-static-mt/md, x86-windows-dll-mt/md, x64-windows-static-mt/md, x64-windows-dll-mt/md (VCPKG_PLATFORM_TOOLSET=v143)",
             "- Package: curl[tool] (libcurl + curl.exe)",
             "",
             "Asset: $zipBase"
