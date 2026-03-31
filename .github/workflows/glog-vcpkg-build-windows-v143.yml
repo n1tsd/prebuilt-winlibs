@@ -16,6 +16,7 @@ env:
   VCPKG_REF: 2025.01.13
   UPLOAD_ARTIFACT: true
   UPLOAD_RELEASE: true
+  KEEP_RELEASES: 2
 
 jobs:
   build:
@@ -178,7 +179,7 @@ jobs:
             $src = Join-Path $installed $t
             if (-not (Test-Path $src)) { throw "Missing vcpkg installed tree: $src" }
             $dst = Join-Path $dist $t
-            foreach ($sub in @("include", "lib", "bin", "share")) {
+            foreach ($sub in @("include", "lib", "bin", "share", "debug")) {
               $sp = Join-Path $src $sub
               if (Test-Path $sp) {
                 Copy-Item -LiteralPath $sp -Destination $dst -Recurse -Force
@@ -214,6 +215,12 @@ jobs:
             '  <PropertyGroup Condition="''$(GlogUseDll)''!=''true''">',
             '    <GlogVcpkgLinkage>static</GlogVcpkgLinkage>',
             '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(Configuration)''==''Debug''">',
+            '    <GlogVcpkgLibSubdir>debug\lib</GlogVcpkgLibSubdir>',
+            '  </PropertyGroup>',
+            '  <PropertyGroup Condition="''$(GlogVcpkgLibSubdir)''==''''">',
+            '    <GlogVcpkgLibSubdir>lib</GlogVcpkgLibSubdir>',
+            '  </PropertyGroup>',
             '  <PropertyGroup>',
             '    <GlogVcpkgTriplet>$(GlogVcpkgArch)-windows-$(GlogVcpkgLinkage)-$(GlogVcpkgCrt)</GlogVcpkgTriplet>',
             '  </PropertyGroup>',
@@ -222,7 +229,7 @@ jobs:
             '      <AdditionalIncludeDirectories>$(GlogRoot)$(GlogVcpkgTriplet)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>',
             '    </ClCompile>',
             '    <Link>',
-            '      <AdditionalLibraryDirectories>$(GlogRoot)$(GlogVcpkgTriplet)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>',
+            '      <AdditionalLibraryDirectories>$(GlogRoot)$(GlogVcpkgTriplet)\$(GlogVcpkgLibSubdir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>',
             '    </Link>',
             '  </ItemDefinitionGroup>',
             '  <ItemDefinitionGroup Condition="''$(Configuration)''==''Debug''">',
@@ -295,6 +302,38 @@ jobs:
           "release_name=$releaseName" >> $env:GITHUB_OUTPUT
           "status=success" >> $env:GITHUB_OUTPUT
           Write-Host "Release tag=$releaseTag"
+
+      - name: Cleanup old GitHub Releases and tags
+        if: success() && env.UPLOAD_RELEASE == 'true' && !cancelled()
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP_RELEASES: ${{ env.KEEP_RELEASES }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = "${{ github.repository }}"
+          $api = "https://api.github.com/repos/$repo"
+          $prefix = "glog-vcpkg-v143-"
+          $keep = [int]$env:KEEP_RELEASES
+          if ($keep -lt 1) { $keep = 1 }
+          $headers = @{
+            Authorization = "Bearer $($env:GITHUB_TOKEN)"
+            "User-Agent"  = "actions-cleanup-script"
+            Accept        = "application/vnd.github+json"
+          }
+
+          $releases = Invoke-RestMethod -Method Get -Headers $headers -Uri "$api/releases?per_page=100"
+          $matched = @($releases | Where-Object { $_.tag_name -like "$prefix*" } | Sort-Object created_at -Descending)
+          $toDelete = @($matched | Select-Object -Skip $keep)
+
+          foreach ($rel in $toDelete) {
+            $tag = $rel.tag_name
+            Write-Host "Deleting release id=$($rel.id), tag=$tag"
+            Invoke-RestMethod -Method Delete -Headers $headers -Uri "$api/releases/$($rel.id)"
+            $tagRef = [uri]::EscapeDataString($tag)
+            Invoke-RestMethod -Method Delete -Headers $headers -Uri "$api/git/refs/tags/$tagRef"
+          }
+          Write-Host "Cleanup done. matched=$($matched.Count), kept=$keep, deleted=$($toDelete.Count)"
 
       - name: Zip distribution for GitHub Release
         if: success() && steps.tag.outputs.status == 'success' && !cancelled()
