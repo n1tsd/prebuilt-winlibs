@@ -1,0 +1,143 @@
+# Build FFmpeg (LGPL, shared DLLs) via vcpkg for x64 with MSVC toolset v143.
+# Decoders/demuxers for a host-side media player: avcodec, avformat,
+# swresample, swscale. HTTPS through Windows schannel (no OpenSSL), hardware
+# decode hooks d3d11va/dxva2 compiled in. No GPL or nonfree parts.
+# Self-contained: the triplet is written inline, only x64-windows-dll-md
+# (release) is built (FFmpeg takes ~20+ min per triplet).
+
+name: ffmpeg vcpkg Windows v143
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+
+env:
+  VCPKG_REF: 2026.10.16
+  FFMPEG_FEATURES: core,avcodec,avformat,swresample,swscale
+  TRIPLET: x64-windows-dll-md
+  DIST: ffmpeg-vcpkg-v143
+  UPLOAD_ARTIFACT: true
+  UPLOAD_RELEASE: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout build repo
+        uses: actions/checkout@v4
+
+      - name: Install Visual Studio 2022 Build Tools (C++, MSVC v143)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $bootstrapper = Join-Path $env:TEMP 'vs_BuildTools.exe'
+          Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vs_BuildTools.exe' -OutFile $bootstrapper -UseBasicParsing
+          $args = @(
+            '--quiet', '--wait', '--norestart', '--nocache',
+            '--add', 'Microsoft.VisualStudio.Workload.VCTools',
+            '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+            '--add', 'Microsoft.VisualStudio.Component.VC.v143.x86.x64'
+          )
+          $p = Start-Process -FilePath $bootstrapper -ArgumentList $args -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -notin 0, 3010) { throw "vs_BuildTools.exe exited with $($p.ExitCode)" }
+
+      - name: Clone and bootstrap vcpkg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vp = Join-Path $env:GITHUB_WORKSPACE 'vcpkg'
+          git clone --depth 1 --branch $env:VCPKG_REF https://github.com/microsoft/vcpkg.git $vp
+          if ($LASTEXITCODE -ne 0) { throw "git clone vcpkg $env:VCPKG_REF failed" }
+          cmd /c "cd /d `"$vp`" && call bootstrap-vcpkg.bat -disableMetrics"
+          if ($LASTEXITCODE -ne 0) { throw 'bootstrap-vcpkg.bat failed' }
+
+      - name: Overlay triplet (v143, release only)
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:GITHUB_WORKSPACE 'vcpkg-overlay-triplets'
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          @(
+            'set(VCPKG_TARGET_ARCHITECTURE x64)',
+            'set(VCPKG_CRT_LINKAGE dynamic)',
+            'set(VCPKG_LIBRARY_LINKAGE dynamic)',
+            'set(VCPKG_PLATFORM_TOOLSET v143)',
+            'set(VCPKG_BUILD_TYPE release)'
+          ) | Set-Content -LiteralPath (Join-Path $dir "$env:TRIPLET.cmake") -Encoding ascii
+
+      - name: vcpkg install ffmpeg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:GITHUB_WORKSPACE
+          & (Join-Path $root 'vcpkg\vcpkg.exe') install "ffmpeg[$env:FFMPEG_FEATURES]:$env:TRIPLET" `
+            --overlay-triplets=(Join-Path $root 'vcpkg-overlay-triplets') --clean-after-build
+          if ($LASTEXITCODE -ne 0) {
+            Get-ChildItem (Join-Path $root 'vcpkg\buildtrees\ffmpeg') -Filter '*.log' -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host "==== $($_.Name)"; Get-Content $_.FullName -Tail 60 }
+            throw 'vcpkg install failed'
+          }
+
+      - name: Assemble distribution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:GITHUB_WORKSPACE
+          $src = Join-Path $root "vcpkg\installed\$env:TRIPLET"
+          $dist = Join-Path $root "dist\$env:DIST"
+          $dst = Join-Path $dist $env:TRIPLET
+          New-Item -ItemType Directory -Path $dst -Force | Out-Null
+          foreach ($d in 'bin', 'include', 'lib', 'share') {
+            if (Test-Path (Join-Path $src $d)) { Copy-Item (Join-Path $src $d) $dst -Recurse -Force }
+          }
+          Remove-Item (Join-Path $dst 'lib\pkgconfig') -Recurse -Force -ErrorAction SilentlyContinue
+          $version = (Get-Content (Join-Path $root 'vcpkg\ports\ffmpeg\vcpkg.json') -Raw | ConvertFrom-Json).version
+          $commit = (git -C (Join-Path $root 'vcpkg') rev-parse HEAD)
+          @(
+            "FFmpeg $version built with vcpkg (MSVC toolset v143)",
+            '',
+            "Triplet: $env:TRIPLET (x64, DLLs, /MD CRT, release only)",
+            "Features: ffmpeg[$env:FFMPEG_FEATURES]",
+            'License: LGPL-2.1-or-later (no gpl/version3/nonfree features); see share/ffmpeg/copyright',
+            'TLS: schannel; hwaccel: d3d11va, d3d12va, dxva2, mediafoundation',
+            '',
+            "vcpkg ref: $env:VCPKG_REF ($commit)",
+            '',
+            'Layout',
+            "- $env:TRIPLET/bin      avcodec-*.dll avformat-*.dll avutil-*.dll swresample-*.dll swscale-*.dll",
+            "- $env:TRIPLET/lib      import libraries (avcodec.lib, ...)",
+            "- $env:TRIPLET/include  libavcodec/ libavformat/ libavutil/ libswresample/ libswscale/"
+          ) | Set-Content -LiteralPath (Join-Path $dist 'README.txt') -Encoding utf8
+          Get-ChildItem (Join-Path $dst 'bin') | Format-Table Name, Length
+
+      - name: Release metadata
+        id: tag
+        if: success() && env.UPLOAD_RELEASE == 'true' && !cancelled()
+        shell: pwsh
+        run: |
+          $tag = "$env:DIST-$(Get-Date -Format yyyyMMdd-HHmm)-vcpkg$($env:VCPKG_REF -replace '[^0-9A-Za-z]', '')"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "release_tag=$tag"
+          Compress-Archive -Path (Join-Path $env:GITHUB_WORKSPACE "dist\$env:DIST\*") `
+            -DestinationPath (Join-Path $env:GITHUB_WORKSPACE "$tag.zip")
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "dist\$env:DIST\README.txt") (Join-Path $env:GITHUB_WORKSPACE 'release-ffmpeg.txt')
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2.1.0
+        if: success() && steps.tag.outputs.release_tag != '' && !cancelled()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: ${{ steps.tag.outputs.release_tag }}
+          body_path: ${{ github.workspace }}/release-ffmpeg.txt
+          files: ${{ github.workspace }}/${{ steps.tag.outputs.release_tag }}.zip
+
+      - name: Upload distribution artifact
+        if: success() && env.UPLOAD_ARTIFACT == 'true' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-vcpkg-v143-dist
+          path: |
+            dist/ffmpeg-vcpkg-v143/**
