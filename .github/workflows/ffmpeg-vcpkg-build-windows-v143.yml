@@ -72,8 +72,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $root = $env:GITHUB_WORKSPACE
+          # A native command gets `--x=(expr)` as two arguments, `--x=` and the
+          # value, so the overlay path goes through a variable.
+          $overlay = Join-Path $root 'vcpkg-overlay-triplets'
           & (Join-Path $root 'vcpkg\vcpkg.exe') install "ffmpeg[$env:FFMPEG_FEATURES]:$env:TRIPLET" `
-            --overlay-triplets=(Join-Path $root 'vcpkg-overlay-triplets') --clean-after-build
+            "--overlay-triplets=$overlay" --clean-after-build
           if ($LASTEXITCODE -ne 0) {
             Get-ChildItem (Join-Path $root 'vcpkg\buildtrees\ffmpeg') -Filter '*.log' -ErrorAction SilentlyContinue |
               ForEach-Object { Write-Host "==== $($_.Name)"; Get-Content $_.FullName -Tail 60 }
